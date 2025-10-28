@@ -1,8 +1,8 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>City Temperature Heatmap — PMTiles (Local Vendor Bundles)</title>
+  <title>Temperature Heatmap — PMTiles</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- vendor bundles -->
   <script src="./vendor/maplibre-gl.js"></script>
@@ -14,16 +14,18 @@
     #ui {
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
-      font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
+      font: 14px system-ui, sans-serif;
+      box-shadow: 0 4px 20px rgba(0,0,0,.12);
+      width: 320px;
     }
-    #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
+    #ui label { display: block; margin: 8px 0 4px; font-weight: bold; }
     #ui .row { display: flex; gap: 8px; align-items: center; }
     #ui .row input[type=range] { flex: 1; }
     #badge {
-      position: absolute; bottom: 10px; left: 10px; z-index: 10;
+      position: absolute; bottom: 10px; left: 10px;
       background: #fff; padding: 6px 8px; border-radius: 8px;
-      font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
+      font: 12px system-ui, sans-serif;
+      box-shadow: 0 2px 8px rgba(0,0,0,.12);
     }
   </style>
 </head>
@@ -62,57 +64,41 @@
     </div>
   </div>
 
-  <div id="badge">
-    Data: PMTiles (Cloudflare R2) · MapLibre GL
-  </div>
+  <div id="badge">PMTiles from Cloudflare R2 · MapLibre GL</div>
 
   <script>
-    // Expect globals from vendor bundles:
-    // - window.maplibregl (from maplibre-gl.js)
-    // - window.pmtiles    (from pmtiles.js)
-    // - optional window.BaseMaps or similar from basemaps.js (we fall back if missing)
-
-    // Register PMTiles protocol with MapLibre
-    (function registerPMTilesProtocol() {
-      if (!window.pmtiles || !window.maplibregl) {
-        console.error("Missing vendor bundles: pmtiles.js or maplibre-gl.js");
-        return;
-      }
+    // Register PMTiles protocol
+    (function() {
       const protocol = new window.pmtiles.Protocol();
       window.maplibregl.addProtocol("pmtiles", protocol.tile);
-      // Keep a reference to avoid GC in some browsers
       window.__pmtilesProtocol = protocol;
     })();
 
-    // ---- Config ----
+    // Config
     const BASE = "https://8c7865a9a248b61dfd121e1a9474a940.r2.cloudflarestorage.com/tempheatmap";
-    const PMTILES_URL = `${BASE}/all_temps.pmtiles`; // change if your filename differs
-    const DATE = "2025-07-23"; // adjust if your data uses another date
-    const INIT_CENTER = [10.80, 45.16]; // near Mantova; tweak as needed
+    const PMTILES_URL = `${BASE}/all_temps.pmtiles`;
+    const DATE = "2025-07-23";   // adjust if your data uses another date
+    const INIT_CENTER = [10.80, 45.16];  // Mantova approx
     const INIT_ZOOM = 12.2;
 
-    // URL params support: ?hour=19&place=sparafucile
+    // URL params (?hour=19&place=sparafucile)
     const urlParams = new URLSearchParams(location.search);
     const initHour = Number(urlParams.get("hour") ?? 19);
     const initPlace = urlParams.get("place") ?? "__all__";
 
-    // Basemap source helper: use basemaps.js if present, else fallback to OSM raster
-    function basemapSource() {
-      // If your basemaps.js exposes something like window.BaseMaps.getOSM(), use it here.
-      // Fallback to standard OSM tiles if not available.
-      return {
-        type: "raster",
-        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-        tileSize: 256
-      };
-    }
-
-    // Build initial style
+    // Build map style
     const style = {
       version: 8,
       sources: {
-        basemap: basemapSource(),
-        temps: { type: "vector", url: `pmtiles://${PMTILES_URL}` }
+        basemap: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tileSize: 256
+        },
+        temps: {
+          type: "vector",
+          url: `pmtiles://${PMTILES_URL}`
+        }
       },
       layers: [
         { id: "basemap", type: "raster", source: "basemap" },
@@ -122,7 +108,6 @@
           source: "temps",
           "source-layer": "temps",
           paint: {
-            // Weight = temperature value scaled 20°C..35°C → 0..1 (adjust these to your climate)
             "heatmap-weight": [
               "interpolate", ["linear"], ["get", "value"],
               20, 0,
@@ -141,13 +126,11 @@
               1.0, "rgb(178,24,43)"
             ]
           },
-          // Start filtered to initial hour; place filter added later if needed
           filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
         }
       ]
     };
 
-    // Create map
     const map = new window.maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -155,7 +138,7 @@
       style
     });
 
-    // UI hooks
+    // UI elements
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
@@ -165,7 +148,6 @@
     const $intensity = document.getElementById("intensity");
     const $intensityLabel = document.getElementById("intensityLabel");
 
-    // Initial UI values
     $hour.value = String(initHour);
     $hourLabel.textContent = `${String(initHour).padStart(2,"0")}:00`;
     $place.value = initPlace;
@@ -182,7 +164,6 @@
         ? timeFilter
         : ["all", timeFilter, ["==", ["get","place"], placeVal]];
       map.setFilter("heat", combined);
-      // Update URL for shareable view
       history.replaceState(null, "", `?hour=${$hour.value}&place=${placeVal}`);
     }
 
@@ -193,7 +174,6 @@
       $intensityLabel.textContent = $intensity.value;
     }
 
-    // Listeners
     $hour.addEventListener("input", () => {
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
       applyFilters();
@@ -210,7 +190,7 @@
 
     map.on("error", (e) => {
       console.error(e);
-      $status.textContent = "error (open console)";
+      $status.textContent = "error";
     });
   </script>
 </body>
