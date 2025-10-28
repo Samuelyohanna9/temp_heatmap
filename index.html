@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>City Temperature Heatmap — PMTiles (Cloudflare R2 / GitHub Pages)</title>
+  <title>City Temperature Heatmap</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
   <style>
@@ -21,6 +21,11 @@
       position: absolute; bottom: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 6px 8px; border-radius: 8px;
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
+    }
+    #chartContainer {
+      position:absolute;top:10px;right:10px;width:300px;height:200px;
+      background:#fff;opacity:0.95;padding:10px;border-radius:8px;
+      display:none;z-index:20;
     }
   </style>
 </head>
@@ -63,7 +68,12 @@
     Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL
   </div>
 
+  <div id="chartContainer">
+    <canvas id="tempChart"></canvas>
+  </div>
+
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
 
@@ -73,11 +83,10 @@
 
     // ---- Config ----
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
-    const DATE = "2025-07-23"; // adjust if your data uses another date
-    const INIT_CENTER = [10.80, 45.16];  // Mantova approx
+    const DATE = "2025-07-23";
+    const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
 
-    // URL params support: ?hour=19&place=sparafucile
     const urlParams = new URLSearchParams(location.search);
     const initHour = Number(urlParams.get("hour") ?? 19);
     const initPlace = urlParams.get("place") ?? "__all__";
@@ -106,7 +115,7 @@
             id: "heat",
             type: "heatmap",
             source: "temps",
-            "source-layer": "temps",  // must match the layer name you set with tippecanoe
+            "source-layer": "temps",
             paint: {
               "heatmap-weight": [
                 "interpolate", ["linear"], ["get", "value"],
@@ -118,12 +127,10 @@
               "heatmap-opacity": 0.9,
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
-                0.0, "rgba(33,102,172,0)",
-                0.2, "rgb(103,169,207)",
-                0.4, "rgb(209,229,240)",
-                0.6, "rgb(253,219,199)",
-                0.8, "rgb(239,138,98)",
-                1.0, "rgb(178,24,43)"
+                0.0, "rgba(0,255,0,0)",   // transparent green
+                0.3, "rgb(0,255,0)",      // green
+                0.6, "rgb(255,255,0)",    // yellow
+                1.0, "rgb(255,0,0)"       // red
               ]
             },
             filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
@@ -141,6 +148,8 @@
     const $radiusLabel = document.getElementById("radiusLabel");
     const $intensity = document.getElementById("intensity");
     const $intensityLabel = document.getElementById("intensityLabel");
+    const chartContainer = document.getElementById("chartContainer");
+    let chart = null;
 
     $hour.value = String(initHour);
     $hourLabel.textContent = `${String(initHour).padStart(2,"0")}:00`;
@@ -180,6 +189,45 @@
       $status.textContent = "ready";
       applyFilters();
       applyPaint();
+    });
+
+    // Hover: show popup + chart
+    let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+    map.on("mousemove", (e) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: ["heat"] });
+      if (!features.length) {
+        popup.remove();
+        chartContainer.style.display = "none";
+        return;
+      }
+      const f = features[0];
+      const { value, time, place } = f.properties;
+      popup.setLngLat(f.geometry.coordinates)
+        .setHTML(`<strong>${value.toFixed(1)}°C</strong><br>${time}<br>${place}`)
+        .addTo(map);
+
+      // For demo: fake timeseries with variation around current value
+      // In real case: load from your dataset
+      const hours = Array.from({length:24}, (_,i)=>`${String(i).padStart(2,"0")}:00`);
+      const temps = hours.map((h,i)=> value + Math.sin(i/3)*0.5 );
+
+      chartContainer.style.display = "block";
+      const ctx = document.getElementById("tempChart").getContext("2d");
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: hours,
+          datasets: [{
+            label: `Temp at ${place}`,
+            data: temps,
+            borderColor: 'rgb(255,0,0)',
+            backgroundColor: 'rgba(255,0,0,0.2)',
+            tension: 0.3
+          }]
+        },
+        options: { responsive: true, maintainAspectRatio: false }
+      });
     });
 
     map.on("error", (e) => {
