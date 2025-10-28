@@ -1,31 +1,26 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Temperature Heatmap — PMTiles</title>
+  <title>City Temperature Heatmap — PMTiles (Cloudflare R2 / GitHub Pages)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- vendor bundles -->
-  <script src="./vendor/maplibre-gl.js"></script>
-  <script src="./vendor/pmtiles.js"></script>
-  <script src="./vendor/basemaps.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
   <style>
     html, body { margin: 0; height: 100%; }
     #map { position: absolute; inset: 0; }
     #ui {
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
-      font: 14px system-ui, sans-serif;
-      box-shadow: 0 4px 20px rgba(0,0,0,.12);
-      width: 320px;
+      font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
     }
-    #ui label { display: block; margin: 8px 0 4px; font-weight: bold; }
+    #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
     #ui .row { display: flex; gap: 8px; align-items: center; }
     #ui .row input[type=range] { flex: 1; }
     #badge {
-      position: absolute; bottom: 10px; left: 10px;
+      position: absolute; bottom: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 6px 8px; border-radius: 8px;
-      font: 12px system-ui, sans-serif;
-      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+      font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
   </style>
 </head>
@@ -64,81 +59,80 @@
     </div>
   </div>
 
-  <div id="badge">PMTiles from Cloudflare R2 · MapLibre GL</div>
+  <div id="badge">
+    Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL
+  </div>
 
-  <script>
-    // Register PMTiles protocol
-    (function() {
-      const protocol = new window.pmtiles.Protocol();
-      window.maplibregl.addProtocol("pmtiles", protocol.tile);
-      window.__pmtilesProtocol = protocol;
-    })();
+  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+  <script type="module">
+    import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
 
-    // Config
-    const BASE = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
-    const PMTILES_URL = `${BASE}/all_temps.pmtiles`;
-    const DATE = "2025-07-23";   // adjust if your data uses another date
+    // PMTiles protocol
+    const protocol = new pmtiles.Protocol();
+    maplibregl.addProtocol("pmtiles", protocol.tile);
+
+    // ---- Config ----
+    const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
+    const DATE = "2025-07-23"; // adjust if your data uses another date
     const INIT_CENTER = [10.80, 45.16];  // Mantova approx
     const INIT_ZOOM = 12.2;
 
-    // URL params (?hour=19&place=sparafucile)
+    // URL params support: ?hour=19&place=sparafucile
     const urlParams = new URLSearchParams(location.search);
     const initHour = Number(urlParams.get("hour") ?? 19);
     const initPlace = urlParams.get("place") ?? "__all__";
 
-    // Build map style
-    const style = {
-      version: 8,
-      sources: {
-        basemap: {
-          type: "raster",
-          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-          tileSize: 256
-        },
-        temps: {
-          type: "vector",
-          url: `pmtiles://${PMTILES_URL}`
-        }
-      },
-      layers: [
-        { id: "basemap", type: "raster", source: "basemap" },
-        {
-          id: "heat",
-          type: "heatmap",
-          source: "temps",
-          "source-layer": "temps",
-          paint: {
-            "heatmap-weight": [
-              "interpolate", ["linear"], ["get", "value"],
-              20, 0,
-              35, 1
-            ],
-            "heatmap-radius": 22,
-            "heatmap-intensity": 1.0,
-            "heatmap-opacity": 0.9,
-            "heatmap-color": [
-              "interpolate", ["linear"], ["heatmap-density"],
-              0.0, "rgba(33,102,172,0)",
-              0.2, "rgb(103,169,207)",
-              0.4, "rgb(209,229,240)",
-              0.6, "rgb(253,219,199)",
-              0.8, "rgb(239,138,98)",
-              1.0, "rgb(178,24,43)"
-            ]
-          },
-          filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
-        }
-      ]
-    };
-
-    const map = new window.maplibregl.Map({
+    // ---- Map ----
+    const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
       zoom: INIT_ZOOM,
-      style
+      style: {
+        version: 8,
+        sources: {
+          basemap: {
+            type: "raster",
+            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize: 256
+          },
+          temps: {
+            type: "vector",
+            url: `pmtiles://${PMTILES_URL}`
+          }
+        },
+        layers: [
+          { id: "basemap", type: "raster", source: "basemap" },
+          {
+            id: "heat",
+            type: "heatmap",
+            source: "temps",
+            "source-layer": "temps",  // must match the layer name you set with tippecanoe
+            paint: {
+              "heatmap-weight": [
+                "interpolate", ["linear"], ["get", "value"],
+                20, 0,
+                35, 1
+              ],
+              "heatmap-radius": 22,
+              "heatmap-intensity": 1.0,
+              "heatmap-opacity": 0.9,
+              "heatmap-color": [
+                "interpolate", ["linear"], ["heatmap-density"],
+                0.0, "rgba(33,102,172,0)",
+                0.2, "rgb(103,169,207)",
+                0.4, "rgb(209,229,240)",
+                0.6, "rgb(253,219,199)",
+                0.8, "rgb(239,138,98)",
+                1.0, "rgb(178,24,43)"
+              ]
+            },
+            filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
+          }
+        ]
+      }
     });
 
-    // UI elements
+    // ---- UI ----
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
@@ -160,10 +154,10 @@
     function applyFilters() {
       const timeFilter = ["==", ["get", "time"], currentTimeStr()];
       const placeVal = $place.value;
-      const combined = (placeVal === "__all__")
+      const filter = (placeVal === "__all__")
         ? timeFilter
         : ["all", timeFilter, ["==", ["get","place"], placeVal]];
-      map.setFilter("heat", combined);
+      map.setFilter("heat", filter);
       history.replaceState(null, "", `?hour=${$hour.value}&place=${placeVal}`);
     }
 
@@ -190,7 +184,7 @@
 
     map.on("error", (e) => {
       console.error(e);
-      $status.textContent = "error";
+      $status.textContent = "error (check console)";
     });
   </script>
 </body>
