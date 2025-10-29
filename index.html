@@ -12,7 +12,7 @@
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
       font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 300px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
     }
     #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
     #ui .row { display: flex; gap: 8px; align-items: center; }
@@ -43,6 +43,13 @@
       <input id="hour" type="range" min="0" max="23" step="1" value="19" />
       <span id="hourLabel" style="width:80px; text-align:right;">19:00</span>
     </div>
+
+    <label for="place">Place</label>
+    <select id="place">
+      <option value="__all__">All places</option>
+      <option value="sparafucile">sparafucile</option>
+      <option value="parcote">parcote</option>
+    </select>
   </div>
 
   <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
@@ -71,7 +78,7 @@
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
 
-    // Decode settings (don’t need to zoom in)
+    // Decode settings (zoom-independent chart)
     const DECODE_ZOOM = 14;
     const EPS = 1e-5;
 
@@ -82,6 +89,7 @@
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
+    const $place = document.getElementById("place");
     const chartContainer = document.getElementById("chartContainer");
     let chart = null;
 
@@ -104,8 +112,9 @@
       const R = 6371000;
       const toRad = d => d * Math.PI/180;
       const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*sin2(dLon/2);
       return 2*R*Math.asin(Math.sqrt(a));
+      function sin2(x){return Math.sin(x)*Math.sin(x);}
     }
 
     // Decode a tile to point GeoJSON features
@@ -124,15 +133,15 @@
       }).catch(() => []);
     }
 
-    // Nearest feature to lon/lat by decoding clicked tile + neighbors at fixed zoom
-    async function findNearestFeature(lon, lat) {
+    // Nearest feature (respect selected place if set)
+    async function findNearestFeature(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const max = Math.pow(2, DECODE_ZOOM);
       const coords = [];
       for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
         coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
-      const all = chunks.flat();
+      const all = placeFilter ? chunks.flat().filter(g => g.properties?.place === placeFilter) : chunks.flat();
       let best = null, bestD = Infinity;
       for (const g of all) {
         const [gx, gy] = g.geometry.coordinates;
@@ -142,17 +151,17 @@
       return best;
     }
 
-    // Build timeseries for the exact coordinate (match all hours at that point)
-    async function loadTimeseriesAtCoord(lon, lat) {
+    // Build timeseries at coord, optionally restricted to place
+    async function loadTimeseriesAtCoord(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
       const map = new Map();
       for (const f of pts) {
         const [fx, fy] = f.geometry.coordinates;
-        const t = f.properties?.time;
-        const v = f.properties?.value;
-        if (t && typeof v !== "undefined" && Math.abs(fx-lon) < EPS && Math.abs(fy-lat) < EPS) {
-          map.set(t, Number(v));
+        const p = f.properties || {};
+        if (placeFilter && p.place !== placeFilter) continue;
+        if (Math.abs(fx-lon) < EPS && Math.abs(fy-lat) < EPS && p.time && typeof p.value !== "undefined") {
+          map.set(p.time, Number(p.value));
         }
       }
       return map;
@@ -180,11 +189,7 @@
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
 
-          /* Heatmap with global-practice defaults:
-             - weight: 24–36°C -> 0–1
-             - radius: zoom-based
-             - intensity: 1.0
-          */
+          // Heatmap: intensity 0.5 (as requested), zoom-based radius, 24→36°C weighting
           {
             id: "heat",
             type: "heatmap",
@@ -201,7 +206,7 @@
                 14, 26,
                 16, 30
               ],
-              "heatmap-intensity": 1.0,
+              "heatmap-intensity": 0.5,              /* << reduced intensity */
               "heatmap-opacity": 0.9,
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
@@ -233,10 +238,16 @@
       }
     });
 
-    function applyFilters() {
+    function buildFilter() {
       const timeFilter = ["==", ["get", "time"], currentTimeStr()];
-      map.setFilter("heat", timeFilter);
-      map.setFilter("points", timeFilter);
+      const p = $place.value;
+      return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
+    }
+
+    function applyFilters() {
+      const f = buildFilter();
+      map.setFilter("heat", f);
+      map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
 
       if (chart) {
@@ -247,40 +258,44 @@
     }
 
     $hour.addEventListener("input", applyFilters);
+    $place.addEventListener("change", applyFilters);
 
     map.on("load", () => {
       $status.textContent = "ready";
       applyFilters();
     });
 
-    // Hover popup
+    // Hover popup (shows place too)
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
-      const { value, time } = f.properties;
+      const { value, time, place } = f.properties;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}`)
+        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}<br>${place ?? ""}`)
         .addTo(map);
     });
 
-    // Click -> show full 24h series for nearest sensor coordinate (zoom-independent)
+    // Click -> 24h series for nearest coordinate, restricted by selected place (if any)
     map.on("click", async (e) => {
       try {
-        let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-        let seedCoord;
+        const placeFilter = $place.value === "__all__" ? null : $place.value;
 
+        let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+        if (placeFilter) features = features.filter(ft => ft.properties?.place === placeFilter);
+
+        let seedCoord;
         if (features.length) {
-          seedCoord = features[0].geometry.coordinates; // [lng, lat]
+          seedCoord = features[0].geometry.coordinates;
         } else {
-          const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat);
+          const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
           if (!nearest) { chartContainer.style.display = "none"; return; }
           seedCoord = nearest.geometry.coordinates;
         }
 
         const [lng, lat] = seedCoord;
-        const byTime = await loadTimeseriesAtCoord(lng, lat);
+        const byTime = await loadTimeseriesAtCoord(lng, lat, placeFilter);
         const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
         chartContainer.style.display = "block";
@@ -292,7 +307,7 @@
           data: {
             labels: hours24,
             datasets: [{
-              label: `Temperature at [${lng.toFixed(5)}, ${lat.toFixed(5)}]`,
+              label: `Temp at [${lng.toFixed(5)}, ${lat.toFixed(5)}]${placeFilter ? " · "+placeFilter : ""}`,
               data: series,
               borderColor: 'rgb(255,0,0)',
               backgroundColor: 'rgba(255,0,0,0.15)',
