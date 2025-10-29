@@ -44,13 +44,6 @@
       <span id="hourLabel" style="width:80px; text-align:right;">19:00</span>
     </div>
 
-    <label for="place">Place</label>
-    <select id="place">
-      <option value="__all__">All places</option>
-      <option value="sparafucile">sparafucile</option>
-      <option value="parcote">parcote</option>
-    </select>
-
     <label for="radius">Heatmap radius</label>
     <div class="row">
       <input id="radius" type="range" min="5" max="50" step="1" value="26" />
@@ -128,8 +121,8 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              "circle-radius": 3,               // interaction area
-              "circle-color": "rgba(0,0,0,0)",  // invisible
+              "circle-radius": 3,
+              "circle-color": "rgba(0,0,0,0)",  
               "circle-stroke-width": 1,
               "circle-stroke-color": "rgba(0,0,0,0)"
             },
@@ -142,7 +135,6 @@
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
-    const $place = document.getElementById("place");
     const $radius = document.getElementById("radius");
     const $radiusLabel = document.getElementById("radiusLabel");
     const $intensity = document.getElementById("intensity");
@@ -155,12 +147,8 @@
 
     function applyFilters() {
       const timeFilter = ["==", ["get", "time"], currentTimeStr()];
-      const placeVal = $place.value;
-      const filter = (placeVal === "__all__")
-        ? timeFilter
-        : ["all", timeFilter, ["==", ["get","place"], placeVal]];
-      map.setFilter("heat", filter);
-      map.setFilter("points", filter);
+      map.setFilter("heat", timeFilter);
+      map.setFilter("points", timeFilter);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
     }
 
@@ -172,7 +160,6 @@
     }
 
     $hour.addEventListener("input", applyFilters);
-    $place.addEventListener("change", applyFilters);
     $radius.addEventListener("input", applyPaint);
     $intensity.addEventListener("input", applyPaint);
 
@@ -188,21 +175,25 @@
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
-      const { value, time, place } = f.properties;
+      const { value, time } = f.properties;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${value.toFixed(1)}°C</strong><br>${time}<br>${place}`)
+        .setHTML(`<strong>${value.toFixed(1)}°C</strong><br>${time}`)
         .addTo(map);
     });
 
-    // Click = timeseries chart
+    // Click = time series for exact coordinates
     map.on("click", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
-      const { place } = f.properties;
+      const [lng, lat] = f.geometry.coordinates;
 
-      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
-        .filter(ft => ft.properties.place === place);
+      // Find all features at the exact same coordinates
+      const feats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME })
+        .filter(ft => {
+          const [x, y] = ft.geometry.coordinates;
+          return Math.abs(x - lng) < 1e-6 && Math.abs(y - lat) < 1e-6;
+        });
 
       const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
       const series = uniqueTimes.map(t => {
@@ -220,7 +211,7 @@
         data: {
           labels: uniqueTimes,
           datasets: [{
-            label: `Temperature at ${place}`,
+            label: `Temperature at [${lng.toFixed(5)}, ${lat.toFixed(5)}]`,
             data: series,
             borderColor: 'rgb(255,0,0)',
             backgroundColor: 'rgba(255,0,0,0.15)',
