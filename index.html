@@ -127,7 +127,12 @@
             type: "circle",
             source: "temps",
             "source-layer": LAYER_NAME,
-            paint: { "circle-radius": 0, "circle-opacity": 0 },
+            paint: {
+              "circle-radius": 3,               // interaction area
+              "circle-color": "rgba(0,0,0,0)",  // invisible
+              "circle-stroke-width": 1,
+              "circle-stroke-color": "rgba(0,0,0,0)"
+            },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           }
         ]
@@ -205,7 +210,6 @@
         return match ? match.properties.value : null;
       });
 
-      // Match slider hour with chart labels
       const selectedHour = currentTimeStr();
 
       chartContainer.style.display = "block";
