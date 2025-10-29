@@ -72,6 +72,7 @@
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
 
+    // PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
@@ -82,6 +83,7 @@
     const INIT_ZOOM = 12.2;
 
     let chart = null;
+
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -125,7 +127,11 @@
             type: "circle",
             source: "temps",
             "source-layer": LAYER_NAME,
-            paint: { "circle-radius": 0, "circle-opacity": 0 },
+            paint: {
+              "circle-radius": 6,
+              "circle-color": "transparent", // invisible but pickable
+              "circle-stroke-width": 0
+            },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           }
         ]
@@ -194,7 +200,7 @@
       const f = features[0];
       const { place } = f.properties;
 
-      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
+      const feats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME })
         .filter(ft => ft.properties.place === place);
 
       const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
