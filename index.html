@@ -23,9 +23,9 @@
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
     #chartContainer {
-      position:absolute; top:10px; right:10px; width:360px; height:260px;
-      background:#fff; opacity:0.98; padding:10px; border-radius:8px;
-      display:none; z-index:20;
+      position:absolute;top:10px;right:10px;width:360px;height:240px;
+      background:#fff;opacity:0.95;padding:10px;border-radius:8px;
+      display:none;z-index:20;
     }
   </style>
 </head>
@@ -64,14 +64,17 @@
     </div>
   </div>
 
-  <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
+  <div id="badge">Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation"></script>
+
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
+    import Pbf from "https://cdn.jsdelivr.net/npm/pbf@3.2.1/dist/pbf.js";
+    import { VectorTile } from "https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@1.3.1/dist/vector-tile.js";
 
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
@@ -83,6 +86,7 @@
     const INIT_ZOOM = 12.2;
 
     let chart = null;
+    const pReader = new pmtiles.PMTiles(PMTILES_URL);
 
     const map = new maplibregl.Map({
       container: "map",
@@ -91,8 +95,12 @@
       style: {
         version: 8,
         sources: {
-          basemap: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256 },
-          temps:   { type: "vector", url: `pmtiles://${PMTILES_URL}` }
+          basemap: {
+            type: "raster",
+            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize: 256
+          },
+          temps: { type: "vector", url: `pmtiles://${PMTILES_URL}` }
         },
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
@@ -102,18 +110,17 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 0, 0, 50, 1],
+              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 20, 0, 40, 1],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
                 0.0, "rgba(0,0,255,0)",
-                0.2, "rgb(0,0,255)",
-                0.4, "rgb(0,255,255)",
-                0.6, "rgb(0,255,0)",
-                0.75,"rgb(255,255,0)",
-                0.9, "rgb(255,165,0)",
+                0.2, "rgb(0,255,255)",
+                0.4, "rgb(0,255,0)",
+                0.6, "rgb(255,255,0)",
+                0.8, "rgb(255,165,0)",
                 1.0, "rgb(255,0,0)"
               ]
             },
@@ -124,7 +131,7 @@
             type: "circle",
             source: "temps",
             "source-layer": LAYER_NAME,
-            paint: { "circle-radius": 6, "circle-color": "transparent" },
+            paint: { "circle-radius": 0, "circle-opacity": 0 },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           }
         ]
@@ -154,13 +161,6 @@
       map.setFilter("heat", filter);
       map.setFilter("points", filter);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
-
-      // update chart highlight if open
-      if (chart) {
-        chart.options.plugins.annotation.annotations.hourLine.xMin = $hour.value;
-        chart.options.plugins.annotation.annotations.hourLine.xMax = $hour.value;
-        chart.update();
-      }
     }
 
     function applyPaint() {
@@ -184,61 +184,100 @@
     // Hover popup
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
-      const feats = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-      if (!feats.length) { popup.remove(); return; }
-      const f = feats[0];
+      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+      if (!features.length) { popup.remove(); return; }
+      const f = features[0];
       const { value, time, place } = f.properties;
       popup.setLngLat(e.lngLat)
         .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}<br>${place}`)
         .addTo(map);
     });
 
-    // Click = timeseries for clicked coordinate
-    map.on("click", (e) => {
-      const feats = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-      if (!feats.length) { chartContainer.style.display = "none"; return; }
-      const f = feats[0];
+    // Helpers for tile decode
+    function lonLatToTile(lon, lat, z) {
+      const x = Math.floor((lon + 180) / 360 * Math.pow(2, z));
+      const y = Math.floor(
+        (1 - Math.log(Math.tan(lat*Math.PI/180) + 1/Math.cos(lat*Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z)
+      );
+      return {x, y};
+    }
+    function roundN(x, n=5){ const p = 10**n; return Math.round(x*p)/p; }
+    const coordKey = (c) => `${roundN(c[0])}|${roundN(c[1])}`;
+
+    // Click = time series chart
+    map.on("click", async (e) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+      if (!features.length) { chartContainer.style.display = "none"; return; }
+      const f = features[0];
       const { place } = f.properties;
       const [lon, lat] = f.geometry.coordinates;
+      const key = coordKey([lon, lat]);
 
-      // get ALL features from this source (not only visible)
-      protocol.get(PMTILES_URL).then(pm => {
-        pm.getGeoJSON().then(fc => {
-          const samePoint = fc.features.filter(ft => {
-            const [x,y] = ft.geometry.coordinates;
-            return Math.abs(x - lon) < 1e-4 && Math.abs(y - lat) < 1e-4;
-          });
-          const pairs = samePoint.map(ft => ({t: ft.properties.time, v: ft.properties.value}));
-          pairs.sort((a,b)=>a.t.localeCompare(b.t));
+      const header = await pReader.getHeader();
+      const z = header.maxZoom;
+      const {x, y} = lonLatToTile(lon, lat, z);
+      const tile = await pReader.getZxy(z, x, y);
+      if (!tile) { chartContainer.style.display = "none"; return; }
 
-          const labels = pairs.map(p => p.t.split("T")[1]);
-          const values = pairs.map(p => p.v);
+      const vt = new VectorTile(new Pbf(new Uint8Array(tile.data)));
+      const layer = vt.layers[LAYER_NAME];
+      if (!layer) { chartContainer.style.display = "none"; return; }
 
-          chartContainer.style.display = "block";
-          const ctx = document.getElementById("tempChart").getContext("2d");
-          if (chart) chart.destroy();
-          chart = new Chart(ctx, {
-            type: 'line',
-            data: { labels, datasets: [{ label: `Temp at ${place}`, data: values, borderColor:'red', tension:0.3 }] },
-            options: {
-              responsive: true, maintainAspectRatio: false,
-              plugins: {
-                annotation: {
-                  annotations: {
-                    hourLine: {
-                      type: 'line',
-                      xMin: $hour.value,
-                      xMax: $hour.value,
-                      borderColor: 'blue',
-                      borderWidth: 2,
-                      label: { content: "selected", enabled: true, position:"start" }
-                    }
-                  }
+      const pairs = [];
+      for (let i = 0; i < layer.length; i++) {
+        const ft = layer.feature(i);
+        const geom = ft.loadGeometry();
+        const pt = geom[0][0];
+        const extent = layer.extent || 4096;
+        const lon2 = (pt.x / extent + x) / Math.pow(2,z) * 360 - 180;
+        const n = Math.PI - 2*Math.PI*(y + pt.y/extent)/Math.pow(2,z);
+        const lat2 = (180/Math.PI) * Math.atan(0.5*(Math.exp(n)-Math.exp(-n)));
+
+        if (coordKey([lon2, lat2]) === key) {
+          const props = ft.properties;
+          pairs.push({ t: props.time, v: props.value });
+        }
+      }
+
+      if (!pairs.length) { chartContainer.style.display = "none"; return; }
+
+      pairs.sort((a,b)=> a.t.localeCompare(b.t));
+      const labels = pairs.map(p => p.t.split("T")[1]);
+      const values = pairs.map(p => p.v);
+
+      chartContainer.style.display = "block";
+      const ctx = document.getElementById("tempChart").getContext("2d");
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: `Temp at ${place} (${roundN(lat)}, ${roundN(lon)})`,
+            data: values,
+            borderColor: 'red',
+            backgroundColor: 'rgba(255,0,0,0.15)',
+            tension: 0.3,
+            pointRadius: 3
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            annotation: {
+              annotations: {
+                hourLine: {
+                  type: 'line',
+                  xMin: Number($hour.value),
+                  xMax: Number($hour.value),
+                  borderColor: 'blue', borderWidth: 2,
+                  label: { enabled: true, content: 'selected' }
                 }
               }
             }
-          });
-        });
+          },
+          scales: { y: { title: { display: true, text: "°C" } } }
+        }
       });
     });
   </script>
