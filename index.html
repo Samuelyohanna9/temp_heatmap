@@ -66,17 +66,27 @@
 
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
+    import Pbf from "https://esm.sh/pbf@3.2.1";
+    import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
     // PMTiles protocol for MapLibre
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // Config
+    // PMTiles archive reference for direct tile decode
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
+    const archive = new pmtiles.PMTiles(PMTILES_URL);
+
+    // Config
     const LAYER_NAME = "temps";
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
+    const DECODE_ZOOM = 14;   // decode at z=14 so we get the exact point's full time series
+    const EPS = 1e-6;         // coordinate match tolerance
+
+    // 24-hour labels
+    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // UI refs
     const $status = document.getElementById("status");
@@ -87,13 +97,47 @@
     const $intensity = document.getElementById("intensity");
     const $intensityLabel = document.getElementById("intensityLabel");
     const chartContainer = document.getElementById("chartContainer");
-
-    // Chart setup
     let chart = null;
-    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     function currentTimeStr() {
       return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
+    }
+
+    // Slippy formula
+    function lonlatToTile(lon, lat, z) {
+      const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
+      const y = Math.floor(
+        (1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z)
+      );
+      return { x, y };
+    }
+
+    // Decode one MVT tile and return features for the clicked lon/lat (exact point across all hours)
+    async function loadTimeseriesFromTile(lon, lat) {
+      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
+      const resp = await archive.getZxy(DECODE_ZOOM, x, y);
+      if (!resp || !resp.data) return new Map(); // empty
+
+      const tile = new VectorTile(new Pbf(new Uint8Array(resp.data)));
+      const layer = tile.layers[LAYER_NAME];
+      if (!layer) return new Map();
+
+      // Collect properties by time for features whose point equals clicked lon/lat
+      const byTime = new Map();
+      for (let i = 0; i < layer.length; i++) {
+        const feat = layer.feature(i);
+        const gj = feat.toGeoJSON(x, y, DECODE_ZOOM); // GeoJSON with lon/lat coords
+        if (gj.geometry && gj.geometry.type === "Point") {
+          const [fx, fy] = gj.geometry.coordinates;
+          if (Math.abs(fx - lon) < EPS && Math.abs(fy - lat) < EPS) {
+            const props = gj.properties || {};
+            if (props.time && typeof props.value !== "undefined") {
+              byTime.set(props.time, Number(props.value));
+            }
+          }
+        }
+      }
+      return byTime;
     }
 
     // Map
@@ -142,7 +186,7 @@
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           },
 
-          // invisible points layer for picking (zoom-dependent circle size)
+          // invisible points for hover/click picking
           {
             id: "points",
             type: "circle",
@@ -197,7 +241,7 @@
       applyPaint();
     });
 
-    // Hover popup (value + time)
+    // Hover popup using rendered features (fast)
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -209,74 +253,69 @@
         .addTo(map);
     });
 
-    // Click → build full 24h series for the exact coordinate (from what’s loaded)
-    map.on("click", (e) => {
+    // Click → decode PMTiles tile at z=14, gather full 24h series for the exact coordinate
+    map.on("click", async (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
+
       const f = features[0];
       const [lng, lat] = f.geometry.coordinates;
 
-      // Collect all features currently available in the source for this coordinate
-      const feats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME })
-        .filter(ft => {
-          const [x, y] = ft.geometry.coordinates;
-          return Math.abs(x - lng) < 1e-6 && Math.abs(y - lat) < 1e-6;
-        });
+      try {
+        const byTime = await loadTimeseriesFromTile(lng, lat);  // <- independent of current zoom
+        // Build series aligned to hours24 (null where missing)
+        const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
-      // Index by time for quick lookup
-      const byTime = new Map();
-      for (const ft of feats) byTime.set(ft.properties.time, ft.properties.value);
+        chartContainer.style.display = "block";
+        const ctx = document.getElementById("tempChart").getContext("2d");
+        if (chart) chart.destroy();
 
-      // Build a 24-length series aligned to hours24, filling with nulls if an hour is missing
-      const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
-
-      // Show chart
-      chartContainer.style.display = "block";
-      const ctx = document.getElementById("tempChart").getContext("2d");
-      if (chart) chart.destroy();
-
-      chart = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels: hours24,
-          datasets: [{
-            label: `Temperature at [${lng.toFixed(5)}, ${lat.toFixed(5)}]`,
-            data: series,
-            borderColor: 'rgb(255,0,0)',
-            backgroundColor: 'rgba(255,0,0,0.15)',
-            borderWidth: 2,
-            pointRadius: 3,
-            spanGaps: true,        // draw across nulls if needed
-            tension: 0.3
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          scales: {
-            x: { ticks: { autoSkip: true, maxTicksLimit: 12 } }
+        chart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: hours24,
+            datasets: [{
+              label: `Temperature at [${lng.toFixed(5)}, ${lat.toFixed(5)}]`,
+              data: series,
+              borderColor: 'rgb(255,0,0)',
+              backgroundColor: 'rgba(255,0,0,0.15)',
+              borderWidth: 2,
+              pointRadius: 3,
+              spanGaps: true,
+              tension: 0.3
+            }]
           },
-          plugins: {
-            legend: { display: true },
-            annotation: {
-              annotations: {
-                selectedHour: {
-                  type: 'line',
-                  scaleID: 'x',
-                  value: currentTimeStr(),
-                  borderColor: 'blue',
-                  borderWidth: 2,
-                  label: {
-                    content: `Hour ${$hour.value}:00`,
-                    enabled: true,
-                    position: 'start'
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+              x: { ticks: { autoSkip: true, maxTicksLimit: 12 } }
+            },
+            plugins: {
+              legend: { display: true },
+              annotation: {
+                annotations: {
+                  selectedHour: {
+                    type: 'line',
+                    scaleID: 'x',
+                    value: currentTimeStr(),
+                    borderColor: 'blue',
+                    borderWidth: 2,
+                    label: {
+                      content: `Hour ${$hour.value}:00`,
+                      enabled: true,
+                      position: 'start'
+                    }
                   }
                 }
               }
             }
           }
-        }
-      });
+        });
+      } catch (err) {
+        console.error("PMTiles decode error:", err);
+        chartContainer.style.display = "none";
+      }
     });
   </script>
 </body>
