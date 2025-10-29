@@ -67,6 +67,14 @@
   <script src="vendor/vector-tile.js"></script>
   <script src="vendor/chart.umd.js"></script>
   <script src="vendor/chartjs-plugin-annotation.min.js"></script>
+  <script>
+    // Register Chart.js annotation plugin (UMD)
+    if (window['chartjs-plugin-annotation']) {
+      Chart.register(window['chartjs-plugin-annotation']);
+    } else if (window.ChartAnnotation) {
+      Chart.register(window.ChartAnnotation);
+    }
+  </script>
 
   <script>
     // ---- Config ----
@@ -98,10 +106,11 @@
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // PMTiles archive for direct decode
-    const archive = new pmtiles.PMTiles(PMTILES_TEMPS);
-    protocol.add(archive);
-    protocol.add(new pmtiles.PMTiles(PMTILES_BASEMAP));
+    // PMTiles archives (also added to protocol cache)
+    const archiveTemps = new pmtiles.PMTiles(PMTILES_TEMPS);
+    const archiveBase  = new pmtiles.PMTiles(PMTILES_BASEMAP);
+    protocol.add(archiveTemps);
+    protocol.add(archiveBase);
 
     // ---- Helpers ----
     function lonlatToTile(lon, lat, z) {
@@ -123,9 +132,9 @@
 
     async function decodeTileToPoints(z, x, y) {
       try {
-        const resp = await archive.getZxy(z, x, y);
+        const resp = await archiveTemps.getZxy(z, x, y);
         if (!resp || !resp.data) return [];
-        // UMD globals: Pbf and vectorTile.VectorTile
+        // UMD globals from your esbuild step
         const vt = new window.vectorTile.VectorTile(new window.Pbf(new Uint8Array(resp.data)));
         const layer = vt.layers[LAYER_NAME];
         if (!layer) return [];
@@ -135,7 +144,8 @@
           if (f.geometry?.type === "Point") feats.push(f);
         }
         return feats;
-      } catch {
+      } catch (err) {
+        console.warn("decodeTileToPoints failed:", err);
         return [];
       }
     }
@@ -161,24 +171,19 @@
     async function loadTimeseriesAtCoord(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
-      const map = new Map();
+      const m = new Map();
       for (const f of pts) {
         const [fx, fy] = f.geometry.coordinates;
         const p = f.properties || {};
         if (placeFilter && p.place !== placeFilter) continue;
         if (Math.abs(fx-lon) < EPS && Math.abs(fy-lat) < EPS && p.time && typeof p.value !== "undefined") {
-          map.set(p.time, Number(p.value));
+          m.set(p.time, Number(p.value));
         }
       }
-      return map;
+      return m;
     }
 
-    // ---- Chart.js plugin registration (UMD) ----
-    if (window['chartjs-plugin-annotation']) {
-      Chart.register(window['chartjs-plugin-annotation']);
-    }
-
-    // ---- Map style ----
+    // ---- Style (basemap via Protomaps theme) ----
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -198,9 +203,9 @@
           minzoom: 8
         }
       },
-      layers: window.basemaps
+      layers: (window.basemaps
         ? window.basemaps.layers(basemapSourceId, window.basemaps.namedFlavor("light"), { lang: "en" })
-        : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}]
+        : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
     // ---- Map ----
@@ -214,7 +219,6 @@
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
-
     map.on("error", (e) => console.error("Map error:", e?.error || e));
 
     function buildFilter() {
