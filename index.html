@@ -47,6 +47,7 @@
     <label for="place">Place</label>
     <select id="place">
       <option value="__all__">All places</option>
+      <!-- Make sure these match your data's "place" property values -->
       <option value="sparafucile">sparafucile</option>
       <option value="parcote">parcote</option>
     </select>
@@ -63,22 +64,25 @@
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
     import Pbf from "https://esm.sh/pbf@3.2.1";
     import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
+    // Use jsDelivr for the Protomaps theme (unpkg path 404s)
+    import ptheme from "https://cdn.jsdelivr.net/npm/protomaps-themes-base@2.0.1/dist/index.js";
 
     // Register PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // URLs for your datasets
+    // Your datasets
     const PMTILES_BASEMAP = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
-    const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles"; // change if needed
+    const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
 
     // Config
     const LAYER_NAME = "temps";
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-    const DECODE_ZOOM = 14;
+    const DECODE_ZOOM = 14;  // fixed decode zoom for click -> timeseries
     const EPS = 1e-5;
+
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // UI refs
@@ -93,6 +97,10 @@
       return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
     }
 
+    // PMTiles archive (for decoding temps tiles directly)
+    const archive = new pmtiles.PMTiles(PMTILES_TEMPS);
+
+    // Slippy helpers
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor(
@@ -100,9 +108,9 @@
       );
       return { x, y };
     }
-
     function wrap(n, mod) { return ((n % mod) + mod) % mod; }
 
+    // Haversine distance
     function haversine(lon1, lat1, lon2, lat2) {
       const R = 6371000;
       const toRad = d => d * Math.PI/180;
@@ -111,33 +119,28 @@
       return 2*R*Math.asin(Math.sqrt(a));
     }
 
-    function decodeTileToPoints(z, x, y) {
-      return archive.getZxy(z, x, y).then(resp => {
-        if (!resp || !resp.data) return [];
-        const vt = new VectorTile(new Pbf(new Uint8Array(resp.data)));
-        const layer = vt.layers[LAYER_NAME];
-        if (!layer) return [];
-        const feats = [];
-        for (let i = 0; i < layer.length; i++) {
-          const f = layer.feature(i).toGeoJSON(x, y, z);
-          if (f.geometry?.type === "Point") feats.push(f);
-        }
-        return feats;
-      }).catch(() => []);
+    // Decode a tile to point GeoJSON features
+    async function decodeTileToPoints(z, x, y) {
+      const resp = await archive.getZxy(z, x, y).catch(() => null);
+      if (!resp || !resp.data) return [];
+      const vt = new VectorTile(new Pbf(new Uint8Array(resp.data)));
+      const layer = vt.layers[LAYER_NAME];
+      if (!layer) return [];
+      const feats = [];
+      for (let i=0; i<layer.length; i++) {
+        const f = layer.feature(i).toGeoJSON(x, y, z);
+        if (f.geometry?.type === "Point") feats.push(f);
+      }
+      return feats;
     }
 
     async function findNearestFeature(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const max = Math.pow(2, DECODE_ZOOM);
       const coords = [];
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
-          coords.push([ wrap(x+dx, max), wrap(y+dy, max) ]);
-        }
-      }
-      const chunks = await Promise.all(coords.map(([tx, ty]) =>
-        decodeTileToPoints(DECODE_ZOOM, tx, ty)
-      ));
+      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
+        coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
+      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
       let all = chunks.flat();
       if (placeFilter) all = all.filter(g => g.properties?.place === placeFilter);
       let best = null, bestD = Infinity;
@@ -164,6 +167,7 @@
       return map;
     }
 
+    // MapLibre map
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -177,7 +181,7 @@
             type: "vector",
             url: `pmtiles://${PMTILES_BASEMAP}`,
             minzoom: 0,
-            maxzoom: 14
+            maxzoom: 14   /* adjust if your basemap supports more */
           },
           temps: {
             type: "vector",
@@ -185,20 +189,42 @@
             minzoom: 8
           }
         },
-        layers: []
+        layers: []  // theme will populate
       }
     });
+
+    function buildFilter() {
+      const timeFilter = ["==", ["get","time"], currentTimeStr()];
+      const p = $place.value;
+      return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
+    }
+
+    function applyFilters() {
+      const f = buildFilter();
+      if (map.getLayer("heat"))  map.setFilter("heat", f);
+      if (map.getLayer("points")) map.setFilter("points", f);
+      $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
+
+      if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
+        chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
+        chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
+        chart.update('none');
+      }
+    }
 
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // Add basemap layers (Protomaps theme)
-      import("https://unpkg.com/protomaps-themes-base@2.0.1/dist/index.js").then(ptheme => {
+      // Add basemap layers from the Protomaps theme
+      try {
         const layers = ptheme.layers({ source: "basemap" });
         for (const layer of layers) map.addLayer(layer);
-      });
+      } catch (e) {
+        console.warn("Basemap theme failed to load; adding a plain background.", e);
+        map.addLayer({ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }});
+      }
 
-      // Add heatmap layer
+      // Heatmap (intensity 0.5)
       map.addLayer({
         id: "heat",
         type: "heatmap",
@@ -216,10 +242,10 @@
             1.0, "rgb(255,0,0)"
           ]
         },
-        filter: ["==", ["get","time"], currentTimeStr()]
+        filter: buildFilter()
       });
 
-      // Add invisible picking layer
+      // Invisible picking points
       map.addLayer({
         id: "points",
         type: "circle",
@@ -232,45 +258,28 @@
           "circle-stroke-width": 0,
           "circle-stroke-color": "rgba(0,0,0,0)"
         },
-        filter: ["==", ["get","time"], currentTimeStr()]
+        filter: buildFilter()
       });
 
-      // Attach UI handlers
+      // UI listeners
       $hour.addEventListener("input", applyFilters);
       $place.addEventListener("change", applyFilters);
       applyFilters();
     });
 
-    function buildFilter() {
-      const timeFilter = ["==", ["get","time"], currentTimeStr()];
-      const p = $place.value;
-      return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
-    }
-
-    function applyFilters() {
-      const f = buildFilter();
-      map.setFilter("heat", f);
-      map.setFilter("points", f);
-      $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
-
-      if (chart) {
-        chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
-        chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
-        chart.update('none');
-      }
-    }
-
-    let popup = new maplibregl.Popup({ closeButton:false, closeOnClick:false });
+    // Hover popup
+    let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
       const { value, time, place } = f.properties;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}<br>${place ?? ""}`)
+        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}${place ? "<br>"+place : ""}`)
         .addTo(map);
     });
 
+    // Click -> show full 24h series at nearest sensor (zoom-independent)
     map.on("click", async (e) => {
       try {
         const placeFilter = $place.value === "__all__" ? null : $place.value;
@@ -330,7 +339,7 @@
             }
           }
         });
-      } catch(err) {
+      } catch (err) {
         console.error("Click/decode error:", err);
         chartContainer.style.display = "none";
       }
