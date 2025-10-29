@@ -23,7 +23,7 @@
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
     #chartContainer {
-      position:absolute;top:10px;right:10px;width:340px;height:240px;
+      position:absolute;top:10px;right:10px;width:320px;height:220px;
       background:#fff;opacity:0.95;padding:10px;border-radius:8px;
       display:none;z-index:20;
     }
@@ -69,14 +69,13 @@
 
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.4.0"></script>
 
+  <!-- Use esm.sh for ES module compatibility -->
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
-    import Pbf from "https://cdn.jsdelivr.net/npm/pbf@3.2.1/index.js";
+    import Pbf from "https://esm.sh/pbf@3.2.1";
     import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
-    // PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
@@ -87,8 +86,6 @@
     const INIT_ZOOM = 12.2;
 
     let chart = null;
-    const pReader = new pmtiles.PMTiles(PMTILES_URL);
-
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -182,17 +179,6 @@
       applyPaint();
     });
 
-    // Helpers to compute tile index
-    function lonLatToTile(lon, lat, z) {
-      const x = Math.floor((lon + 180) / 360 * Math.pow(2, z));
-      const y = Math.floor(
-        (1 - Math.log(Math.tan(lat*Math.PI/180) + 1/Math.cos(lat*Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z)
-      );
-      return {x, y};
-    }
-    function roundN(x, n=5){ const p = 10**n; return Math.round(x*p)/p; }
-    const coordKey = (c) => `${roundN(c[0])}|${roundN(c[1])}`;
-
     // Hover popup
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
@@ -205,43 +191,21 @@
         .addTo(map);
     });
 
-    // Click = fetch all times for that coordinate
-    map.on("click", async (e) => {
+    // Click = timeseries chart
+    map.on("click", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
       const { place } = f.properties;
-      const [lon, lat] = f.geometry.coordinates;
-      const key = coordKey([lon, lat]);
 
-      const header = await pReader.getHeader();
-      const z = header.maxZoom;
-      const {x, y} = lonLatToTile(lon, lat, z);
-      const tile = await pReader.getZxy(z, x, y);
-      if (!tile) { chartContainer.style.display = "none"; return; }
+      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
+        .filter(ft => ft.properties.place === place);
 
-      const vt = new VectorTile(new Pbf(new Uint8Array(tile.data)));
-      const layer = vt.layers[LAYER_NAME];
-      if (!layer) { chartContainer.style.display = "none"; return; }
-
-      const pairs = [];
-      for (let i = 0; i < layer.length; i++) {
-        const ft = layer.feature(i);
-        const geom = ft.loadGeometry()[0][0];
-        const extent = layer.extent || 4096;
-        const lon2 = (geom.x / extent + x) / Math.pow(2, z) * 360 - 180;
-        const n = Math.PI - 2*Math.PI*(y + geom.y / extent) / Math.pow(2, z);
-        const lat2 = (180/Math.PI) * Math.atan(0.5*(Math.exp(n)-Math.exp(-n)));
-        if (coordKey([lon2, lat2]) === key) {
-          const props = ft.properties;
-          pairs.push({ t: props.time, v: props.value });
-        }
-      }
-      if (!pairs.length) { chartContainer.style.display = "none"; return; }
-
-      pairs.sort((a,b)=> a.t.localeCompare(b.t));
-      const labels = pairs.map(p => p.t.split("T")[1]);
-      const values = pairs.map(p => p.v);
+      const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
+      const series = uniqueTimes.map(t => {
+        const match = feats.find(ft => ft.properties.time === t);
+        return match ? match.properties.value : null;
+      });
 
       chartContainer.style.display = "block";
       const ctx = document.getElementById("tempChart").getContext("2d");
@@ -249,14 +213,15 @@
       chart = new Chart(ctx, {
         type: 'line',
         data: {
-          labels,
+          labels: uniqueTimes,
           datasets: [{
-            label: `Temp at ${place} (${roundN(lat)}, ${roundN(lon)})`,
-            data: values,
-            borderColor: 'red',
+            label: `Temperature at ${place}`,
+            data: series,
+            borderColor: 'rgb(255,0,0)',
             backgroundColor: 'rgba(255,0,0,0.15)',
-            tension: 0.3,
-            pointRadius: 3
+            borderWidth: 2,
+            pointRadius: 3,
+            tension: 0.3
           }]
         },
         options: { responsive: true, maintainAspectRatio: false }
