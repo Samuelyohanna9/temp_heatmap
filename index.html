@@ -12,7 +12,7 @@
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
       font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 300px;
     }
     #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
     #ui .row { display: flex; gap: 8px; align-items: center; }
@@ -43,21 +43,9 @@
       <input id="hour" type="range" min="0" max="23" step="1" value="19" />
       <span id="hourLabel" style="width:80px; text-align:right;">19:00</span>
     </div>
-
-    <label for="radius">Heatmap radius</label>
-    <div class="row">
-      <input id="radius" type="range" min="5" max="50" step="1" value="26" />
-      <span id="radiusLabel" style="width:36px; text-align:right;">26</span>
-    </div>
-
-    <label for="intensity">Heatmap intensity</label>
-    <div class="row">
-      <input id="intensity" type="range" min="0.1" max="3" step="0.1" value="1.0" />
-      <span id="intensityLabel" style="width:36px; text-align:right;">1.0</span>
-    </div>
   </div>
 
-  <div id="badge">Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL</div>
+  <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
@@ -69,10 +57,11 @@
     import Pbf from "https://esm.sh/pbf@3.2.1";
     import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
-    // Map + PMTiles
+    // PMTiles protocol for MapLibre
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
+    // PMTiles archive for direct tile decode
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const archive = new pmtiles.PMTiles(PMTILES_URL);
 
@@ -81,18 +70,18 @@
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-    const DECODE_ZOOM = 14;      // fixed decode zoom
-    const EPS = 1e-5;            // coordinate match tolerance in degrees (~1 m)
+
+    // Decode settings (don’t need to zoom in)
+    const DECODE_ZOOM = 14;
+    const EPS = 1e-5;
+
+    // 24h labels
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // UI refs
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
-    const $radius = document.getElementById("radius");
-    const $radiusLabel = document.getElementById("radiusLabel");
-    const $intensity = document.getElementById("intensity");
-    const $intensityLabel = document.getElementById("intensityLabel");
     const chartContainer = document.getElementById("chartContainer");
     let chart = null;
 
@@ -119,7 +108,7 @@
       return 2*R*Math.asin(Math.sqrt(a));
     }
 
-    // Decode one tile and return all GeoJSON point features
+    // Decode a tile to point GeoJSON features
     function decodeTileToPoints(z, x, y) {
       return archive.getZxy(z, x, y).then(resp => {
         if (!resp || !resp.data) return [];
@@ -135,7 +124,7 @@
       }).catch(() => []);
     }
 
-    // Find nearest feature to lon/lat by decoding clicked tile + 8 neighbors at DECODE_ZOOM
+    // Nearest feature to lon/lat by decoding clicked tile + neighbors at fixed zoom
     async function findNearestFeature(lon, lat) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const max = Math.pow(2, DECODE_ZOOM);
@@ -150,10 +139,10 @@
         const d = haversine(lon, lat, gx, gy);
         if (d < bestD) { best = g; bestD = d; }
       }
-      return best; // may be null if empty
+      return best;
     }
 
-    // Build timeseries map for the exact coordinate (matches all hours at that point)
+    // Build timeseries for the exact coordinate (match all hours at that point)
     async function loadTimeseriesAtCoord(lon, lat) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
@@ -190,6 +179,12 @@
         },
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
+
+          /* Heatmap with global-practice defaults:
+             - weight: 24–36°C -> 0–1
+             - radius: zoom-based
+             - intensity: 1.0
+          */
           {
             id: "heat",
             type: "heatmap",
@@ -198,7 +193,14 @@
             minzoom: 8,
             paint: {
               "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 24, 0, 36, 1],
-              "heatmap-radius": 26,
+              "heatmap-radius": [
+                "interpolate", ["linear"], ["zoom"],
+                8, 6,
+                10, 10,
+                12, 18,
+                14, 26,
+                16, 30
+              ],
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
               "heatmap-color": [
@@ -211,6 +213,8 @@
             },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           },
+
+          // Invisible picking layer for hover/click
           {
             id: "points",
             type: "circle",
@@ -241,24 +245,15 @@
         chart.update('none');
       }
     }
-    function applyPaint() {
-      map.setPaintProperty("heat", "heatmap-radius", Number($radius.value));
-      map.setPaintProperty("heat", "heatmap-intensity", Number($intensity.value));
-      $radiusLabel.textContent = $radius.value;
-      $intensityLabel.textContent = $intensity.value;
-    }
 
     $hour.addEventListener("input", applyFilters);
-    $radius.addEventListener("input", applyPaint);
-    $intensity.addEventListener("input", applyPaint);
 
     map.on("load", () => {
       $status.textContent = "ready";
       applyFilters();
-      applyPaint();
     });
 
-    // Hover popup (fast, uses rendered points)
+    // Hover popup
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -270,7 +265,7 @@
         .addTo(map);
     });
 
-    // Click: prefer rendered point; if none, find nearest by decoding tiles; then build 24h series at that exact coord
+    // Click -> show full 24h series for nearest sensor coordinate (zoom-independent)
     map.on("click", async (e) => {
       try {
         let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -279,7 +274,6 @@
         if (features.length) {
           seedCoord = features[0].geometry.coordinates; // [lng, lat]
         } else {
-          // Fallback: find nearest feature to click, independent of zoom/viewport
           const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat);
           if (!nearest) { chartContainer.style.display = "none"; return; }
           seedCoord = nearest.geometry.coordinates;
@@ -287,7 +281,6 @@
 
         const [lng, lat] = seedCoord;
         const byTime = await loadTimeseriesAtCoord(lng, lat);
-
         const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
         chartContainer.style.display = "block";
