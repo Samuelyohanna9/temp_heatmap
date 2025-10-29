@@ -40,8 +40,8 @@
 
     <label for="hour">Hour</label>
     <div class="row">
-      <input id="hour" type="range" min="0" max="0" step="1" value="0" />
-      <span id="hourLabel" style="width:120px; text-align:right;">--</span>
+      <input id="hour" type="range" min="0" max="23" step="1" value="19" />
+      <span id="hourLabel" style="width:80px; text-align:right;">19:00</span>
     </div>
 
     <label for="place">Place</label>
@@ -77,13 +77,11 @@
 
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const LAYER_NAME = "temps";
-
+    const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
 
-    let times = [];   // unique time values from dataset
     let chart = null;
-
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -106,10 +104,7 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              "heatmap-weight": [
-                "interpolate", ["linear"], ["get", "value"],
-                20, 0, 40, 1
-              ],
+              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 20, 0, 40, 1],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
@@ -123,7 +118,7 @@
                 1.0, "rgb(255,0,0)"
               ]
             },
-            filter: ["==", ["get", "time"], ""]
+            filter: ["==", ["get", "time"], `${DATE}T19:00`]
           },
           {
             id: "points",
@@ -131,7 +126,7 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: { "circle-radius": 0, "circle-opacity": 0 },
-            filter: ["==", ["get", "time"], ""]
+            filter: ["==", ["get", "time"], `${DATE}T19:00`]
           }
         ]
       }
@@ -147,17 +142,19 @@
     const $intensityLabel = document.getElementById("intensityLabel");
     const chartContainer = document.getElementById("chartContainer");
 
-    // --- Utils ---
+    function currentTimeStr() {
+      return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
+    }
+
     function applyFilters() {
-      const timeVal = times[$hour.value];
-      const timeFilter = ["==", ["get", "time"], timeVal];
+      const timeFilter = ["==", ["get", "time"], currentTimeStr()];
       const placeVal = $place.value;
       const filter = (placeVal === "__all__")
         ? timeFilter
         : ["all", timeFilter, ["==", ["get","place"], placeVal]];
       map.setFilter("heat", filter);
       map.setFilter("points", filter);
-      $hourLabel.textContent = timeVal;
+      $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
     }
 
     function applyPaint() {
@@ -167,11 +164,16 @@
       $intensityLabel.textContent = $intensity.value;
     }
 
-    // --- Events ---
     $hour.addEventListener("input", applyFilters);
     $place.addEventListener("change", applyFilters);
     $radius.addEventListener("input", applyPaint);
     $intensity.addEventListener("input", applyPaint);
+
+    map.on("load", () => {
+      $status.textContent = "ready";
+      applyFilters();
+      applyPaint();
+    });
 
     // Hover popup
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -185,18 +187,18 @@
         .addTo(map);
     });
 
-    // Click: show timeseries chart for that place
+    // Click = timeseries chart
     map.on("click", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
       const { place } = f.properties;
 
-      // Query ALL features for this place
       const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
         .filter(ft => ft.properties.place === place);
 
-      const series = times.map(t => {
+      const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
+      const series = uniqueTimes.map(t => {
         const match = feats.find(ft => ft.properties.time === t);
         return match ? match.properties.value : null;
       });
@@ -207,7 +209,7 @@
       chart = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: times,
+          labels: uniqueTimes,
           datasets: [{
             label: `Temperature at ${place}`,
             data: series,
@@ -220,28 +222,6 @@
         },
         options: { responsive: true, maintainAspectRatio: false }
       });
-    });
-
-    // --- On map load: extract times automatically ---
-    map.on("load", async () => {
-      $status.textContent = "loading times…";
-
-      // Fetch one tile & collect unique times
-      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME});
-      times = [...new Set(feats.map(f => f.properties.time))].sort();
-
-      if (times.length === 0) {
-        $status.textContent = "no data!";
-        return;
-      }
-
-      $hour.max = times.length - 1;
-      $hour.value = 0;
-      $hourLabel.textContent = times[0];
-
-      applyFilters();
-      applyPaint();
-      $status.textContent = "ready";
     });
   </script>
 </body>
