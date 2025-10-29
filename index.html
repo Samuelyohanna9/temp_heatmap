@@ -50,6 +50,7 @@
     <label for="place">Place</label>
     <select id="place">
       <option value="__all__">All places</option>
+      <!-- Make sure these match your data's "place" property values -->
       <option value="sparafucile">sparafucile</option>
       <option value="parcote">parcote</option>
     </select>
@@ -67,8 +68,11 @@
   <script src="vendor/chart.umd.js"></script>
   <script src="vendor/chartjs-plugin-annotation.min.js"></script>
   <script>
+    // Register Chart.js annotation plugin (UMD)
     if (window['chartjs-plugin-annotation']) {
       Chart.register(window['chartjs-plugin-annotation']);
+    } else if (window.ChartAnnotation) {
+      Chart.register(window.ChartAnnotation);
     }
   </script>
 
@@ -82,6 +86,8 @@
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
     const DECODE_ZOOM = 14;
+    const EPS = 1e-5;
+
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // ---- UI refs ----
@@ -99,6 +105,8 @@
     // ---- PMTiles protocol ----
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
+
+    // PMTiles archives (also added to protocol cache)
     const archiveTemps = new pmtiles.PMTiles(PMTILES_TEMPS);
     const archiveBase  = new pmtiles.PMTiles(PMTILES_BASEMAP);
     protocol.add(archiveTemps);
@@ -114,10 +122,19 @@
     }
     function wrap(n, mod) { return ((n % mod) + mod) % mod; }
 
+    function haversine(lon1, lat1, lon2, lat2) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI/180;
+      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(a));
+    }
+
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
         if (!resp || !resp.data) return [];
+        // UMD globals from your esbuild step
         const vt = new window.vectorTile.VectorTile(new window.Pbf(new Uint8Array(resp.data)));
         const layer = vt.layers[LAYER_NAME];
         if (!layer) return [];
@@ -127,47 +144,46 @@
           if (f.geometry?.type === "Point") feats.push(f);
         }
         return feats;
-      } catch { return []; }
-    }
-
-    async function decodeNeighborhood(lon, lat, z=DECODE_ZOOM) {
-      const { x, y } = lonlatToTile(lon, lat, z);
-      const max = Math.pow(2, z);
-      const coords = [];
-      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
-        coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
-      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(z, tx, ty)));
-      return chunks.flat();
+      } catch (err) {
+        console.warn("decodeTileToPoints failed:", err);
+        return [];
+      }
     }
 
     async function findNearestFeature(lon, lat, placeFilter) {
-      const all = await decodeNeighborhood(lon, lat, DECODE_ZOOM);
-      const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
-      let best = null, bestD2 = Infinity;
-      for (const g of filtered) {
+      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
+      const max = Math.pow(2, DECODE_ZOOM);
+      const coords = [];
+      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
+        coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
+      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
+      let all = chunks.flat();
+      if (placeFilter) all = all.filter(g => g.properties?.place === placeFilter);
+      let best = null, bestD = Infinity;
+      for (const g of all) {
         const [gx, gy] = g.geometry.coordinates;
-        const dx = gx - lon, dy = gy - lat;
-        const d2 = dx*dx + dy*dy;
-        if (d2 < bestD2) { best = g; bestD2 = d2; }
+        const d = haversine(lon, lat, gx, gy);
+        if (d < bestD) { best = g; bestD = d; }
       }
       return best;
     }
 
-    async function loadTimeseriesById(sensorId, lonHint, latHint, placeFilter) {
-      const all = await decodeNeighborhood(lonHint, latHint, DECODE_ZOOM);
-      const rows = all.filter(f => String(f.properties?.id) === String(sensorId) &&
-                                   (!placeFilter || f.properties?.place === placeFilter));
-      const map = new Map();
-      for (const f of rows) {
+    async function loadTimeseriesAtCoord(lon, lat, placeFilter) {
+      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
+      const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
+      const m = new Map();
+      for (const f of pts) {
+        const [fx, fy] = f.geometry.coordinates;
         const p = f.properties || {};
-        if (p.time && typeof p.value !== "undefined") {
-          map.set(p.time, Number(p.value));
+        if (placeFilter && p.place !== placeFilter) continue;
+        if (Math.abs(fx-lon) < EPS && Math.abs(fy-lat) < EPS && p.time && typeof p.value !== "undefined") {
+          m.set(p.time, Number(p.value));
         }
       }
-      return map;
+      return m;
     }
 
-    // ---- Style ----
+    // ---- Style (basemap via Protomaps theme) ----
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -177,10 +193,15 @@
         [basemapSourceId]: {
           type: "vector",
           url: "pmtiles://" + PMTILES_BASEMAP,
-          minzoom: 0, maxzoom: 14,
+          minzoom: 0,
+          maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8 }
+        temps: {
+          type: "vector",
+          url: "pmtiles://" + PMTILES_TEMPS,
+          minzoom: 8
+        }
       },
       layers: (window.basemaps
         ? window.basemaps.layers(basemapSourceId, window.basemaps.namedFlavor("light"), { lang: "en" })
@@ -190,7 +211,10 @@
     // ---- Map ----
     const map = new maplibregl.Map({
       container: "map",
-      style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22
+      style,
+      center: INIT_CENTER,
+      zoom: INIT_ZOOM,
+      maxZoom: 22
     });
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
@@ -218,23 +242,44 @@
 
     map.on("load", () => {
       $status.textContent = "ready";
+
+      // Heatmap (intensity 0.5)
       map.addLayer({
-        id: "heat", type: "heatmap", source: "temps", "source-layer": LAYER_NAME,
+        id: "heat",
+        type: "heatmap",
+        source: "temps",
+        "source-layer": LAYER_NAME,
         paint: {
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0,36,1],
           "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6,10,10,12,18,14,26,16,30],
-          "heatmap-intensity": 0.5, "heatmap-opacity": 0.9,
+          "heatmap-intensity": 0.5,
+          "heatmap-opacity": 0.9,
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
-            0.0,"rgba(0,255,0,0)",0.3,"rgb(0,255,0)",0.6,"rgb(255,255,0)",1.0,"rgb(255,0,0)"]
+            0.0, "rgba(0,255,0,0)",
+            0.3, "rgb(0,255,0)",
+            0.6, "rgb(255,255,0)",
+            1.0, "rgb(255,0,0)"
+          ]
         },
         filter: buildFilter()
       });
+
+      // Invisible picking points
       map.addLayer({
-        id: "points", type: "circle", source: "temps", "source-layer": LAYER_NAME, minzoom: 8,
-        paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 8,8,12,5,16,3],
-                 "circle-color": "rgba(0,0,0,0)" },
+        id: "points",
+        type: "circle",
+        source: "temps",
+        "source-layer": LAYER_NAME,
+        minzoom: 8,
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 8,8,12,5,16,3],
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-stroke-width": 0,
+          "circle-stroke-color": "rgba(0,0,0,0)"
+        },
         filter: buildFilter()
       });
+
       $hour.addEventListener("input", applyFilters);
       $place.addEventListener("change", applyFilters);
       applyFilters();
@@ -246,53 +291,76 @@
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
-      const { id, value, time, place } = f.properties;
-      popup.setLngLat(e.lngLat).setHTML(`
-        <div><strong>${Number(value).toFixed(1)}°C</strong></div>
-        <div>${time}</div>
-        ${place ? `<div>${place}</div>` : ""}
-        ${typeof id !== "undefined" ? `<div>ID: ${id}</div>` : ""}
-      `).addTo(map);
+      const { value, time, place } = f.properties;
+      popup.setLngLat(e.lngLat)
+        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}${place ? "<br>"+place : ""}`)
+        .addTo(map);
     });
 
-    // Click -> build timeseries by sensor ID
+    // Click -> 24h series at nearest sensor
     map.on("click", async (e) => {
       try {
         const placeFilter = $place.value === "__all__" ? null : $place.value;
-        let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
-                    .filter(f => !placeFilter || f.properties?.place === placeFilter)[0];
-        if (!ft) {
-          ft = await findNearestFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
-          if (!ft) { chartContainer.style.display = "none"; return; }
+        let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+        if (placeFilter) features = features.filter(ft => ft.properties?.place === placeFilter);
+
+        let seedCoord;
+        if (features.length) {
+          seedCoord = features[0].geometry.coordinates;
+        } else {
+          const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
+          if (!nearest) { chartContainer.style.display = "none"; return; }
+          seedCoord = nearest.geometry.coordinates;
         }
-        const sensorId = ft.properties?.id;
-        if (sensorId == null) { chartContainer.style.display = "none"; return; }
-        const [lng, lat] = ft.geometry.coordinates;
-        const byTime = await loadTimeseriesById(sensorId, lng, lat, placeFilter);
+
+        const [lng, lat] = seedCoord;
+        const byTime = await loadTimeseriesAtCoord(lng, lat, placeFilter);
         const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
         chartContainer.style.display = "block";
         const ctx = document.getElementById("tempChart").getContext("2d");
         if (chart) chart.destroy();
+
         chart = new Chart(ctx, {
           type: 'line',
-          data: { labels: hours24,
-            datasets: [{ label: `Sensor ${sensorId}${placeFilter ? " · "+placeFilter : ""}`,
-                         data: series, borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.3 }] },
-          options: { responsive: true, maintainAspectRatio: false,
+          data: {
+            labels: hours24,
+            datasets: [{
+              label: `Temp at [${lng.toFixed(5)}, ${lat.toFixed(5)}]${placeFilter ? " · "+placeFilter : ""}`,
+              data: series,
+              borderWidth: 2,
+              pointRadius: 3,
+              spanGaps: true,
+              tension: 0.3
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
             scales: { x: { ticks: { autoSkip:true, maxTicksLimit:12 } } },
-            plugins: { legend: { display:true },
-              annotation: { annotations: { selectedHour: {
-                type:'line', scaleID:'x', value: currentTimeStr(),
-                borderWidth:2, label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
-              } } } } }
+            plugins: {
+              legend: { display:true },
+              annotation: {
+                annotations: {
+                  selectedHour: {
+                    type:'line',
+                    scaleID:'x',
+                    value: currentTimeStr(),
+                    borderWidth:2,
+                    label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
+                  }
+                }
+              }
+            }
+          }
         });
       } catch (err) {
-        console.error("Click/id-series error:", err);
+        console.error("Click/decode error:", err);
         chartContainer.style.display = "none";
       }
     });
 
+    // Extra: surface any resource 404s in console clearly
     window.addEventListener("error", (e) => {
       if (e?.message && String(e.message).includes("404")) {
         console.error("A required file returned 404:", e);
