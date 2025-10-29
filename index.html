@@ -23,9 +23,9 @@
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
     #chartContainer {
-      position:absolute;top:10px;right:10px;width:320px;height:220px;
-      background:#fff;opacity:0.95;padding:10px;border-radius:8px;
-      display:none;z-index:20;
+      position:absolute; top:10px; right:10px; width:340px; height:240px;
+      background:#fff; opacity:0.98; padding:10px; border-radius:8px;
+      display:none; z-index:20;
     }
   </style>
 </head>
@@ -64,7 +64,7 @@
     </div>
   </div>
 
-  <div id="badge">Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL</div>
+  <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
@@ -72,16 +72,19 @@
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
 
+    // PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
+    // Config
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const LAYER_NAME = "temps";
-    const DATE = "2025-07-23";
+    const DATE = "2025-07-23"; // your dataset date
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
 
     let chart = null;
+
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -89,12 +92,8 @@
       style: {
         version: 8,
         sources: {
-          basemap: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256
-          },
-          temps: { type: "vector", url: `pmtiles://${PMTILES_URL}` }
+          basemap: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256 },
+          temps:   { type: "vector", url: `pmtiles://${PMTILES_URL}` }
         },
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
@@ -104,13 +103,12 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"],
-                0, 0,   // 0°C = no weight
-                50, 1   // 50°C = max weight
-              ],
+              // Global-style weighting by temperature (°C)
+              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 0, 0, 50, 1],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
+              // Color by heatmap density (standard practice)
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
                 0.0, "rgba(0,0,255,0)",  // transparent blue
@@ -124,14 +122,15 @@
             },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           },
+          // Transparent but pickable points (for hover/click)
           {
             id: "points",
             type: "circle",
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              "circle-radius": 6,
-              "circle-color": "transparent"
+              "circle-radius": 6,           // pickable area
+              "circle-color": "transparent" // invisible
             },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           }
@@ -182,33 +181,42 @@
       applyPaint();
     });
 
-    // Hover popup
+    // Hover popup (value, time, place)
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-      if (!features.length) { popup.remove(); return; }
-      const f = features[0];
+      const feats = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+      if (!feats.length) { popup.remove(); return; }
+      const f = feats[0];
       const { value, time, place } = f.properties;
-      popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${value.toFixed(1)}°C</strong><br>${time}<br>${place}`)
+      popup.setLngLat(f.geometry.coordinates || e.lngLat)
+        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}<br>${place}`)
         .addTo(map);
     });
 
-    // Click = timeseries chart
-    map.on("click", (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-      if (!features.length) { chartContainer.style.display = "none"; return; }
-      const f = features[0];
-      const { place } = f.properties;
+    // Click → time series for the exact clicked coordinate (same lon/lat across all hours)
+    map.on("click", () => {
+      const featsAtPoint = map.queryRenderedFeatures({ layers: ["points"] });
+      if (!featsAtPoint.length) { chartContainer.style.display = "none"; return; }
+      const f = featsAtPoint[0];
+      const coord = f.geometry && f.geometry.coordinates ? f.geometry.coordinates.slice() : null;
+      if (!coord) { chartContainer.style.display = "none"; return; }
 
-      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
-        .filter(ft => ft.properties.place === place);
-
-      const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
-      const series = uniqueTimes.map(t => {
-        const match = feats.find(ft => ft.properties.time === t);
-        return match ? match.properties.value : null;
+      // Collect all loaded features in view, then filter by the SAME coordinates (within a tiny tolerance)
+      const allFeats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME });
+      const EPS = 1e-6; // tolerance in degrees
+      const samePointFeats = allFeats.filter(ft => {
+        if (!ft.geometry || ft.geometry.type !== "Point") return false;
+        const c = ft.geometry.coordinates;
+        return Math.abs(c[0]-coord[0]) < EPS && Math.abs(c[1]-coord[1]) < EPS;
       });
+
+      // Build a time→value series (sorted)
+      const pairs = samePointFeats.map(ft => ({ t: ft.properties.time, v: ft.properties.value }));
+      if (!pairs.length) { chartContainer.style.display = "none"; return; }
+      pairs.sort((a,b) => a.t.localeCompare(b.t));
+
+      const labels = pairs.map(p => p.t);
+      const values = pairs.map(p => p.v);
 
       chartContainer.style.display = "block";
       const ctx = document.getElementById("tempChart").getContext("2d");
@@ -216,10 +224,10 @@
       chart = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: uniqueTimes,
+          labels,
           datasets: [{
-            label: `Temperature at ${place}`,
-            data: series,
+            label: `Temperature at lon ${coord[0].toFixed(5)}, lat ${coord[1].toFixed(5)}`,
+            data: values,
             borderColor: 'rgb(255,0,0)',
             backgroundColor: 'rgba(255,0,0,0.15)',
             borderWidth: 2,
@@ -227,7 +235,10 @@
             tension: 0.3
           }]
         },
-        options: { responsive: true, maintainAspectRatio: false }
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: { y: { title: { display: true, text: "°C" } } }
+        }
       });
     });
   </script>
