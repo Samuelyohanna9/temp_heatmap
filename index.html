@@ -67,20 +67,36 @@
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
 
-    // Register pmtiles protocol
+    // PMTiles protocol for MapLibre
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // PMTiles archive reference
+    // Config
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
-    const archive = new pmtiles.PMTiles(PMTILES_URL);
-
     const LAYER_NAME = "temps";
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
 
+    // UI refs
+    const $status = document.getElementById("status");
+    const $hour = document.getElementById("hour");
+    const $hourLabel = document.getElementById("hourLabel");
+    const $radius = document.getElementById("radius");
+    const $radiusLabel = document.getElementById("radiusLabel");
+    const $intensity = document.getElementById("intensity");
+    const $intensityLabel = document.getElementById("intensityLabel");
+    const chartContainer = document.getElementById("chartContainer");
+
+    // Chart setup
     let chart = null;
+    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
+
+    function currentTimeStr() {
+      return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
+    }
+
+    // Map
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -93,41 +109,55 @@
             tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
             tileSize: 256
           },
-          temps: { type: "vector", url: `pmtiles://${PMTILES_URL}` }
+          temps: {
+            type: "vector",
+            url: `pmtiles://${PMTILES_URL}`,
+            minzoom: 8
+          }
         },
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
+
           {
             id: "heat",
             type: "heatmap",
             source: "temps",
             "source-layer": LAYER_NAME,
+            minzoom: 8,
             paint: {
-              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 20, 0, 40, 1],
+              // weight by temperature (adjust domain to your climate)
+              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 24, 0, 36, 1],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
+              // green → yellow → red
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
-                0.0, "rgba(0,0,255,0)",
-                0.2, "rgb(0,255,255)",
-                0.4, "rgb(0,255,0)",
+                0.0, "rgba(0,255,0,0)",
+                0.3, "rgb(0,255,0)",
                 0.6, "rgb(255,255,0)",
-                0.8, "rgb(255,165,0)",
                 1.0, "rgb(255,0,0)"
               ]
             },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           },
+
+          // invisible points layer for picking (zoom-dependent circle size)
           {
             id: "points",
             type: "circle",
             source: "temps",
             "source-layer": LAYER_NAME,
+            minzoom: 8,
             paint: {
-              "circle-radius": 3,
-              "circle-color": "rgba(0,0,0,0)",  
-              "circle-stroke-width": 1,
+              "circle-radius": [
+                "interpolate", ["linear"], ["zoom"],
+                8, 6,
+                12, 4,
+                16, 3
+              ],
+              "circle-color": "rgba(0,0,0,0)",
+              "circle-stroke-width": 0,
               "circle-stroke-color": "rgba(0,0,0,0)"
             },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
@@ -136,24 +166,18 @@
       }
     });
 
-    const $status = document.getElementById("status");
-    const $hour = document.getElementById("hour");
-    const $hourLabel = document.getElementById("hourLabel");
-    const $radius = document.getElementById("radius");
-    const $radiusLabel = document.getElementById("radiusLabel");
-    const $intensity = document.getElementById("intensity");
-    const $intensityLabel = document.getElementById("intensityLabel");
-    const chartContainer = document.getElementById("chartContainer");
-
-    function currentTimeStr() {
-      return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
-    }
-
     function applyFilters() {
       const timeFilter = ["==", ["get", "time"], currentTimeStr()];
       map.setFilter("heat", timeFilter);
       map.setFilter("points", timeFilter);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
+
+      // If a chart is open, move the blue line to the new hour
+      if (chart) {
+        chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
+        chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
+        chart.update('none');
+      }
     }
 
     function applyPaint() {
@@ -173,7 +197,7 @@
       applyPaint();
     });
 
-    // Hover popup
+    // Hover popup (value + time)
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -181,48 +205,40 @@
       const f = features[0];
       const { value, time } = f.properties;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${value.toFixed(1)}°C</strong><br>${time}`)
+        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}`)
         .addTo(map);
     });
 
-    // Helper: lon/lat -> tile coords
-    function lonlatToTile(lon, lat, zoom) {
-      const x = Math.floor(((lon + 180) / 360) * Math.pow(2, zoom));
-      const y = Math.floor(
-        (1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)
-      );
-      return { x, y };
-    }
-
-    // Click = time series for exact coordinates
-    map.on("click", async (e) => {
+    // Click → build full 24h series for the exact coordinate (from what’s loaded)
+    map.on("click", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
       const [lng, lat] = f.geometry.coordinates;
 
-      // Force reading data from all zoom levels at that point
+      // Collect all features currently available in the source for this coordinate
       const feats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME })
         .filter(ft => {
           const [x, y] = ft.geometry.coordinates;
           return Math.abs(x - lng) < 1e-6 && Math.abs(y - lat) < 1e-6;
         });
 
-      const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
-      const series = uniqueTimes.map(t => {
-        const match = feats.find(ft => ft.properties.time === t);
-        return match ? match.properties.value : null;
-      });
+      // Index by time for quick lookup
+      const byTime = new Map();
+      for (const ft of feats) byTime.set(ft.properties.time, ft.properties.value);
 
-      const selectedHour = currentTimeStr();
+      // Build a 24-length series aligned to hours24, filling with nulls if an hour is missing
+      const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
+      // Show chart
       chartContainer.style.display = "block";
       const ctx = document.getElementById("tempChart").getContext("2d");
       if (chart) chart.destroy();
+
       chart = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: uniqueTimes,
+          labels: hours24,
           datasets: [{
             label: `Temperature at [${lng.toFixed(5)}, ${lat.toFixed(5)}]`,
             data: series,
@@ -230,19 +246,24 @@
             backgroundColor: 'rgba(255,0,0,0.15)',
             borderWidth: 2,
             pointRadius: 3,
+            spanGaps: true,        // draw across nulls if needed
             tension: 0.3
           }]
         },
-        options: { 
-          responsive: true, 
+        options: {
+          responsive: true,
           maintainAspectRatio: false,
+          scales: {
+            x: { ticks: { autoSkip: true, maxTicksLimit: 12 } }
+          },
           plugins: {
+            legend: { display: true },
             annotation: {
               annotations: {
                 selectedHour: {
                   type: 'line',
                   scaleID: 'x',
-                  value: selectedHour,
+                  value: currentTimeStr(),
                   borderColor: 'blue',
                   borderWidth: 2,
                   label: {
