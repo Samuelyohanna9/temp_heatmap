@@ -128,8 +128,8 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              "circle-radius": 4,
-              "circle-color": "rgba(0,0,0,0)", // invisible but clickable
+              "circle-radius": 3,               // interaction area
+              "circle-color": "rgba(0,0,0,0)",  // invisible
               "circle-stroke-width": 1,
               "circle-stroke-color": "rgba(0,0,0,0)"
             },
@@ -194,20 +194,15 @@
         .addTo(map);
     });
 
-    // Click = timeseries chart for that exact coordinate
+    // Click = timeseries chart
     map.on("click", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
       const { place } = f.properties;
-      const [lng, lat] = f.geometry.coordinates;
 
-      // Only take features at the same coords
       const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
-        .filter(ft => {
-          const c = ft.geometry.coordinates;
-          return c[0] === lng && c[1] === lat;
-        });
+        .filter(ft => ft.properties.place === place);
 
       const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
       const series = uniqueTimes.map(t => {
@@ -225,7 +220,7 @@
         data: {
           labels: uniqueTimes,
           datasets: [{
-            label: `Temperature at ${place} (${lng.toFixed(4)}, ${lat.toFixed(4)})`,
+            label: `Temperature at ${place}`,
             data: series,
             borderColor: 'rgb(255,0,0)',
             backgroundColor: 'rgba(255,0,0,0.15)',
