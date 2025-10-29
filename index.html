@@ -64,35 +64,27 @@
     </div>
   </div>
 
-  <div id="badge">
-    Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL
-  </div>
-
-  <div id="chartContainer">
-    <canvas id="tempChart"></canvas>
-  </div>
+  <div id="badge">Data: PMTiles from Cloudflare R2 · Styled with MapLibre GL</div>
+  <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
 
-    // PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // ---- Config ----
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-    const LAYER_NAME = "temps"; // change if your tippecanoe layer name differs
+    const LAYER_NAME = "temps"; // check tippecanoe layer name
 
     const urlParams = new URLSearchParams(location.search);
     const initHour = Number(urlParams.get("hour") ?? 19);
     const initPlace = urlParams.get("place") ?? "__all__";
 
-    // ---- Map ----
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
@@ -105,10 +97,7 @@
             tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
             tileSize: 256
           },
-          temps: {
-            type: "vector",
-            url: `pmtiles://${PMTILES_URL}`
-          }
+          temps: { type: "vector", url: `pmtiles://${PMTILES_URL}` }
         },
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
@@ -120,8 +109,7 @@
             paint: {
               "heatmap-weight": [
                 "interpolate", ["linear"], ["get", "value"],
-                 0, 0,
-                40, 1
+                 0, 0, 40, 1
               ],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
@@ -137,12 +125,19 @@
               ]
             },
             filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
+          },
+          {
+            id: "points",
+            type: "circle",
+            source: "temps",
+            "source-layer": LAYER_NAME,
+            paint: { "circle-radius": 0, "circle-opacity": 0 },
+            filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
           }
         ]
       }
     });
 
-    // ---- UI ----
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
@@ -170,7 +165,7 @@
         ? timeFilter
         : ["all", timeFilter, ["==", ["get","place"], placeVal]];
       map.setFilter("heat", filter);
-      history.replaceState(null, "", `?hour=${$hour.value}&place=${placeVal}`);
+      map.setFilter("points", filter);
     }
 
     function applyPaint() {
@@ -197,11 +192,8 @@
     // Hover popup
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["heat"] });
-      if (!features.length) {
-        popup.remove();
-        return;
-      }
+      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+      if (!features.length) { popup.remove(); return; }
       const f = features[0];
       const { value, time, place } = f.properties;
       popup.setLngLat(e.lngLat)
@@ -209,19 +201,15 @@
         .addTo(map);
     });
 
-    // Click for chart (TODO: replace with PMTiles decode)
+    // Click for chart (still demo wave until PMTiles decode added)
     map.on("click", (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["heat"] });
-      if (!features.length) {
-        chartContainer.style.display = "none";
-        return;
-      }
+      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+      if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
       const { place, value } = f.properties;
 
-      // Fake timeseries still — replace later with PMTiles decode
       const hours = Array.from({length:24}, (_,i)=>`${String(i).padStart(2,"0")}:00`);
-      const temps = hours.map((h,i)=> value + Math.sin(i/3)*0.5 );
+      const temps = hours.map((_,i)=> value + Math.sin(i/3)*0.5 );
 
       chartContainer.style.display = "block";
       const ctx = document.getElementById("tempChart").getContext("2d");
@@ -240,21 +228,8 @@
             tension: 0.3
           }]
         },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          scales: {
-            y: { title: { display: true, text: "°C" } },
-            x: { ticks: { maxTicksLimit: 12 } }
-          },
-          plugins: { legend: { display: false } }
-        }
+        options: { responsive: true, maintainAspectRatio: false }
       });
-    });
-
-    map.on("error", (e) => {
-      console.error(e);
-      $status.textContent = "error (check console)";
     });
   </script>
 </body>
