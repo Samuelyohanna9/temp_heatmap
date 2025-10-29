@@ -103,12 +103,11 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: {
-              // Global-style weighting by temperature (°C)
+              // Temperature-weighted heatmap (global practice)
               "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 0, 0, 50, 1],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
-              // Color by heatmap density (standard practice)
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
                 0.0, "rgba(0,0,255,0)",  // transparent blue
@@ -193,24 +192,34 @@
         .addTo(map);
     });
 
+    // Helper: round to N decimals (default 5 ~ 1.1m)
+    function roundN(x, n=5) {
+      const p = Math.pow(10, n);
+      return Math.round(x * p) / p;
+    }
+    const coordKey = (c) => `${roundN(c[0])}|${roundN(c[1])}`;
+
     // Click → time series for the exact clicked coordinate (same lon/lat across all hours)
-    map.on("click", () => {
-      const featsAtPoint = map.queryRenderedFeatures({ layers: ["points"] });
+    map.on("click", (e) => {
+      // IMPORTANT: pass e.point to queryRenderedFeatures so we hit the clicked feature
+      const featsAtPoint = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!featsAtPoint.length) { chartContainer.style.display = "none"; return; }
+
       const f = featsAtPoint[0];
       const coord = f.geometry && f.geometry.coordinates ? f.geometry.coordinates.slice() : null;
       if (!coord) { chartContainer.style.display = "none"; return; }
 
-      // Collect all loaded features in view, then filter by the SAME coordinates (within a tiny tolerance)
+      const key = coordKey(coord);
+
+      // Get all currently loaded features in view, then keep only those at the SAME rounded coordinate
       const allFeats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME });
-      const EPS = 1e-6; // tolerance in degrees
+
       const samePointFeats = allFeats.filter(ft => {
         if (!ft.geometry || ft.geometry.type !== "Point") return false;
-        const c = ft.geometry.coordinates;
-        return Math.abs(c[0]-coord[0]) < EPS && Math.abs(c[1]-coord[1]) < EPS;
+        return coordKey(ft.geometry.coordinates) === key;
       });
 
-      // Build a time→value series (sorted)
+      // Build a sorted time→value series
       const pairs = samePointFeats.map(ft => ({ t: ft.properties.time, v: ft.properties.value }));
       if (!pairs.length) { chartContainer.style.display = "none"; return; }
       pairs.sort((a,b) => a.t.localeCompare(b.t));
@@ -226,7 +235,7 @@
         data: {
           labels,
           datasets: [{
-            label: `Temperature at lon ${coord[0].toFixed(5)}, lat ${coord[1].toFixed(5)}`,
+            label: `Temp at ${roundN(coord[1])}°, ${roundN(coord[0])}°`,
             data: values,
             borderColor: 'rgb(255,0,0)',
             backgroundColor: 'rgba(255,0,0,0.15)',
