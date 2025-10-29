@@ -85,9 +85,7 @@
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-    const DECODE_ZOOM = 14;
-    const EPS = 1e-5;
-
+    const DECODE_ZOOM = 14;    // tile decode zoom for sensor picking/series
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // ---- UI refs ----
@@ -122,19 +120,11 @@
     }
     function wrap(n, mod) { return ((n % mod) + mod) % mod; }
 
-    function haversine(lon1, lat1, lon2, lat2) {
-      const R = 6371000;
-      const toRad = d => d * Math.PI/180;
-      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-      return 2*R*Math.asin(Math.sqrt(a));
-    }
-
+    // Decode one PMTiles z/x/y into GeoJSON Points
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
         if (!resp || !resp.data) return [];
-        // UMD globals from your esbuild step
         const vt = new window.vectorTile.VectorTile(new window.Pbf(new Uint8Array(resp.data)));
         const layer = vt.layers[LAYER_NAME];
         if (!layer) return [];
@@ -150,37 +140,45 @@
       }
     }
 
-    async function findNearestFeature(lon, lat, placeFilter) {
-      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
-      const max = Math.pow(2, DECODE_ZOOM);
+    // Gather features from a 3x3 neighborhood around a lon/lat (to be robust near tile edges)
+    async function decodeNeighborhood(lon, lat, z=DECODE_ZOOM) {
+      const { x, y } = lonlatToTile(lon, lat, z);
+      const max = Math.pow(2, z);
       const coords = [];
       for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
         coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
-      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
-      let all = chunks.flat();
-      if (placeFilter) all = all.filter(g => g.properties?.place === placeFilter);
-      let best = null, bestD = Infinity;
-      for (const g of all) {
+      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(z, tx, ty)));
+      return chunks.flat();
+    }
+
+    // Find nearest feature (by geometry) to click, optional place filter
+    async function findNearestFeature(lon, lat, placeFilter) {
+      const all = await decodeNeighborhood(lon, lat, DECODE_ZOOM);
+      const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
+      let best = null, bestD2 = Infinity;
+      for (const g of filtered) {
         const [gx, gy] = g.geometry.coordinates;
-        const d = haversine(lon, lat, gx, gy);
-        if (d < bestD) { best = g; bestD = d; }
+        const dx = (gx - lon), dy = (gy - lat);
+        const d2 = dx*dx + dy*dy; // planar ok for small neighborhoods
+        if (d2 < bestD2) { best = g; bestD2 = d2; }
       }
       return best;
     }
 
-    async function loadTimeseriesAtCoord(lon, lat, placeFilter) {
-      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
-      const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
-      const m = new Map();
-      for (const f of pts) {
-        const [fx, fy] = f.geometry.coordinates;
+    // Build a timeseries strictly by sensor id (robust & zoom-independent)
+    async function loadTimeseriesById(sensorId, lonHint, latHint, placeFilter) {
+      // Use the neighborhood around the clicked location as a seed to collect that id's features
+      const all = await decodeNeighborhood(lonHint, latHint, DECODE_ZOOM);
+      const rows = all.filter(f => String(f.properties?.id) === String(sensorId) &&
+                                   (!placeFilter || f.properties?.place === placeFilter));
+      const map = new Map();
+      for (const f of rows) {
         const p = f.properties || {};
-        if (placeFilter && p.place !== placeFilter) continue;
-        if (Math.abs(fx-lon) < EPS && Math.abs(fy-lat) < EPS && p.time && typeof p.value !== "undefined") {
-          m.set(p.time, Number(p.value));
+        if (p.time && typeof p.value !== "undefined") {
+          map.set(p.time, Number(p.value));
         }
       }
-      return m;
+      return map;
     }
 
     // ---- Style (basemap via Protomaps theme) ----
@@ -243,7 +241,7 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // Heatmap (intensity 0.5)
+      // Heatmap
       map.addLayer({
         id: "heat",
         type: "heatmap",
@@ -291,30 +289,42 @@
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
-      const { value, time, place } = f.properties;
+      const { id, value, time, place } = f.properties;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}${place ? "<br>"+place : ""}`)
+        .setHTML(`<div><strong>${Number(value).toFixed(1)}°C</strong></div>
+                  <div>${time}</div>
+                  ${place ? `<div>${place}</div>` : ""}
+                  ${typeof id !== "undefined" ? `<div>ID: ${id}</div>` : ""}`)
         .addTo(map);
     });
 
-    // Click -> 24h series at nearest sensor
+    // Click -> 24h series by sensor ID (robust; same curve regardless of zoom)
     map.on("click", async (e) => {
       try {
         const placeFilter = $place.value === "__all__" ? null : $place.value;
-        let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-        if (placeFilter) features = features.filter(ft => ft.properties?.place === placeFilter);
 
-        let seedCoord;
-        if (features.length) {
-          seedCoord = features[0].geometry.coordinates;
-        } else {
+        // Prefer rendered feature under the cursor to read its id; otherwise find nearest and read its id.
+        let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
+                    .filter(f => !placeFilter || f.properties?.place === placeFilter)[0];
+
+        if (!ft) {
           const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
           if (!nearest) { chartContainer.style.display = "none"; return; }
-          seedCoord = nearest.geometry.coordinates;
+          ft = nearest; // same shape (GeoJSON) as decoder returns
         }
 
-        const [lng, lat] = seedCoord;
-        const byTime = await loadTimeseriesAtCoord(lng, lat, placeFilter);
+        const sensorId = ft.properties?.id;
+        if (typeof sensorId === "undefined" || sensorId === null) {
+          console.warn("Clicked feature has no 'id' property.");
+          chartContainer.style.display = "none";
+          return;
+        }
+
+        const [lng, lat] = (ft.geometry?.type === "Point")
+          ? ft.geometry.coordinates
+          : [e.lngLat.lng, e.lngLat.lat];
+
+        const byTime = await loadTimeseriesById(sensorId, lng, lat, placeFilter);
         const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
         chartContainer.style.display = "block";
@@ -326,7 +336,7 @@
           data: {
             labels: hours24,
             datasets: [{
-              label: `Temp at [${lng.toFixed(5)}, ${lat.toFixed(5)}]${placeFilter ? " · "+placeFilter : ""}`,
+              label: `Sensor ${sensorId}${placeFilter ? " · "+placeFilter : ""}`,
               data: series,
               borderWidth: 2,
               pointRadius: 3,
@@ -355,7 +365,7 @@
           }
         });
       } catch (err) {
-        console.error("Click/decode error:", err);
+        console.error("Click/id-series error:", err);
         chartContainer.style.display = "none";
       }
     });
