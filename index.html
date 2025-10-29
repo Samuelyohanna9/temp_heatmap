@@ -4,17 +4,14 @@
   <meta charset="utf-8" />
   <title>City Temperature Heatmap</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- LOCAL vendor CSS -->
   <link href="vendor/maplibre-gl.css" rel="stylesheet" />
-
   <style>
     html, body { margin: 0; height: 100%; }
     #map { position: absolute; inset: 0; }
     #ui {
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
-      font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font: 14px/1.25 system-ui, sans-serif;
       box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
     }
     #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
@@ -40,13 +37,11 @@
       <strong>Temperature Heatmap</strong>
       <span id="status" style="opacity:.7;">loading…</span>
     </div>
-
     <label for="hour">Hour</label>
     <div class="row">
       <input id="hour" type="range" min="0" max="23" step="1" value="19" />
       <span id="hourLabel" style="width:80px; text-align:right;">19:00</span>
     </div>
-
     <label for="place">Place</label>
     <select id="place">
       <option value="__all__">All places</option>
@@ -58,7 +53,7 @@
   <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
-  <!-- LOCAL vendor JS -->
+  <!-- vendor scripts -->
   <script src="vendor/maplibre-gl.js"></script>
   <script src="vendor/pmtiles.js"></script>
   <script src="vendor/basemaps.js"></script>
@@ -67,11 +62,8 @@
   <script src="vendor/chart.umd.js"></script>
   <script src="vendor/chartjs-plugin-annotation.min.js"></script>
   <script>
-    if (window['chartjs-plugin-annotation']) {
-      Chart.register(window['chartjs-plugin-annotation']);
-    } else if (window.ChartAnnotation) {
-      Chart.register(window.ChartAnnotation);
-    }
+    if (window['chartjs-plugin-annotation']) Chart.register(window['chartjs-plugin-annotation']);
+    else if (window.ChartAnnotation) Chart.register(window.ChartAnnotation);
   </script>
 
   <script>
@@ -84,7 +76,9 @@
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
     const DECODE_ZOOM = 14;
-    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
+
+    // note the seconds included
+    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00:00`);
 
     // ---- UI refs ----
     const $status = document.getElementById("status");
@@ -95,7 +89,7 @@
     let chart = null;
 
     function currentTimeStr() {
-      return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
+      return `${DATE}T${String($hour.value).padStart(2,"0")}:00:00`;
     }
 
     // ---- PMTiles protocol ----
@@ -106,7 +100,7 @@
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
-    // ---- Helpers ----
+    // ---- Helpers (decode etc.) ----
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor(
@@ -221,7 +215,6 @@
       if (map.getLayer("heat"))   map.setFilter("heat", f);
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
-
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
@@ -231,7 +224,6 @@
 
     map.on("load", () => {
       $status.textContent = "ready";
-
       map.addLayer({
         id: "heat",
         type: "heatmap",
@@ -251,20 +243,15 @@
         },
         filter: buildFilter()
       });
-
       map.addLayer({
         id: "points",
         type: "circle",
         source: "temps",
         "source-layer": LAYER_NAME,
         minzoom: 8,
-        paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 8,8,12,5,16,3],
-          "circle-color": "rgba(0,0,0,0)"
-        },
+        paint: { "circle-radius": 5, "circle-color": "rgba(0,0,0,0)" },
         filter: buildFilter()
       });
-
       $hour.addEventListener("input", applyFilters);
       $place.addEventListener("change", applyFilters);
       applyFilters();
@@ -282,74 +269,45 @@
         .addTo(map);
     });
 
-    // ---- Click: build 24h series by sensor id ----
+    // Click -> build series by sensor id
     map.on("click", async (e) => {
       try {
         const placeFilter = $place.value === "__all__" ? null : $place.value;
         let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
                     .filter(f => !placeFilter || f.properties?.place === placeFilter)[0];
-
         if (!ft) {
           const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
           if (!nearest) { chartContainer.style.display = "none"; return; }
           ft = nearest;
         }
-
         const sensorId = ft.properties?.id;
-        if (typeof sensorId === "undefined") {
-          chartContainer.style.display = "none"; return;
-        }
-
+        if (typeof sensorId === "undefined") { chartContainer.style.display = "none"; return; }
         const [lng, lat] = ft.geometry.coordinates;
         const byTime = await loadTimeseriesById(sensorId, lng, lat, placeFilter);
         const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
-
         chartContainer.style.display = "block";
         const ctx = document.getElementById("tempChart").getContext("2d");
         if (chart) chart.destroy();
-
         chart = new Chart(ctx, {
           type: 'line',
-          data: {
-            labels: hours24,
-            datasets: [{
-              label: `Sensor ${sensorId}${placeFilter ? " · "+placeFilter : ""}`,
-              data: series,
-              borderWidth: 2,
-              pointRadius: 3,
-              spanGaps: true,
-              tension: 0.3
-            }]
-          },
+          data: { labels: hours24, datasets: [{
+            label: `Sensor ${sensorId}${placeFilter ? " · "+placeFilter : ""}`,
+            data: series, borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.3
+          }]},
           options: {
-            responsive: true,
-            maintainAspectRatio: false,
+            responsive: true, maintainAspectRatio: false,
             scales: { x: { ticks: { autoSkip:true, maxTicksLimit:12 } } },
-            plugins: {
-              legend: { display:true },
-              annotation: {
-                annotations: {
-                  selectedHour: {
-                    type:'line',
-                    scaleID:'x',
-                    value: currentTimeStr(),
-                    borderWidth:2,
-                    label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
-                  }
-                }
-              }
-            }
+            plugins: { legend: { display:true }, annotation: {
+              annotations: { selectedHour: {
+                type:'line', scaleID:'x', value: currentTimeStr(),
+                borderWidth:2, label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
+              }}
+            }}
           }
         });
       } catch (err) {
         console.error("Click/id-series error:", err);
         chartContainer.style.display = "none";
-      }
-    });
-
-    window.addEventListener("error", (e) => {
-      if (e?.message && String(e.message).includes("404")) {
-        console.error("A required file returned 404:", e);
       }
     });
   </script>
