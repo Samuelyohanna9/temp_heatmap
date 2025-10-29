@@ -40,8 +40,8 @@
 
     <label for="hour">Hour</label>
     <div class="row">
-      <input id="hour" type="range" min="0" max="23" step="1" value="19" />
-      <span id="hourLabel" style="width:60px; text-align:right;">19:00</span>
+      <input id="hour" type="range" min="0" max="0" step="1" value="0" />
+      <span id="hourLabel" style="width:120px; text-align:right;">--</span>
     </div>
 
     <label for="place">Place</label>
@@ -76,14 +76,13 @@
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
-    const DATE = "2025-07-23";
+    const LAYER_NAME = "temps";
+
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-    const LAYER_NAME = "temps"; // check tippecanoe layer name
 
-    const urlParams = new URLSearchParams(location.search);
-    const initHour = Number(urlParams.get("hour") ?? 19);
-    const initPlace = urlParams.get("place") ?? "__all__";
+    let times = [];   // unique time values from dataset
+    let chart = null;
 
     const map = new maplibregl.Map({
       container: "map",
@@ -109,7 +108,7 @@
             paint: {
               "heatmap-weight": [
                 "interpolate", ["linear"], ["get", "value"],
-                 0, 0, 40, 1
+                20, 0, 40, 1
               ],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
@@ -124,7 +123,7 @@
                 1.0, "rgb(255,0,0)"
               ]
             },
-            filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
+            filter: ["==", ["get", "time"], ""]
           },
           {
             id: "points",
@@ -132,7 +131,7 @@
             source: "temps",
             "source-layer": LAYER_NAME,
             paint: { "circle-radius": 0, "circle-opacity": 0 },
-            filter: ["==", ["get", "time"], `${DATE}T${String(initHour).padStart(2,"0")}:00`]
+            filter: ["==", ["get", "time"], ""]
           }
         ]
       }
@@ -147,25 +146,18 @@
     const $intensity = document.getElementById("intensity");
     const $intensityLabel = document.getElementById("intensityLabel");
     const chartContainer = document.getElementById("chartContainer");
-    let chart = null;
 
-    $hour.value = String(initHour);
-    $hourLabel.textContent = `${String(initHour).padStart(2,"0")}:00`;
-    $place.value = initPlace;
-
-    function currentTimeStr() {
-      const h = Number($hour.value);
-      return `${DATE}T${String(h).padStart(2,"0")}:00`;
-    }
-
+    // --- Utils ---
     function applyFilters() {
-      const timeFilter = ["==", ["get", "time"], currentTimeStr()];
+      const timeVal = times[$hour.value];
+      const timeFilter = ["==", ["get", "time"], timeVal];
       const placeVal = $place.value;
       const filter = (placeVal === "__all__")
         ? timeFilter
         : ["all", timeFilter, ["==", ["get","place"], placeVal]];
       map.setFilter("heat", filter);
       map.setFilter("points", filter);
+      $hourLabel.textContent = timeVal;
     }
 
     function applyPaint() {
@@ -175,19 +167,11 @@
       $intensityLabel.textContent = $intensity.value;
     }
 
-    $hour.addEventListener("input", () => {
-      $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
-      applyFilters();
-    });
+    // --- Events ---
+    $hour.addEventListener("input", applyFilters);
     $place.addEventListener("change", applyFilters);
     $radius.addEventListener("input", applyPaint);
     $intensity.addEventListener("input", applyPaint);
-
-    map.on("load", () => {
-      $status.textContent = "ready";
-      applyFilters();
-      applyPaint();
-    });
 
     // Hover popup
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -201,15 +185,21 @@
         .addTo(map);
     });
 
-    // Click for chart (still demo wave until PMTiles decode added)
+    // Click: show timeseries chart for that place
     map.on("click", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
-      const { place, value } = f.properties;
+      const { place } = f.properties;
 
-      const hours = Array.from({length:24}, (_,i)=>`${String(i).padStart(2,"0")}:00`);
-      const temps = hours.map((_,i)=> value + Math.sin(i/3)*0.5 );
+      // Query ALL features for this place
+      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME})
+        .filter(ft => ft.properties.place === place);
+
+      const series = times.map(t => {
+        const match = feats.find(ft => ft.properties.time === t);
+        return match ? match.properties.value : null;
+      });
 
       chartContainer.style.display = "block";
       const ctx = document.getElementById("tempChart").getContext("2d");
@@ -217,10 +207,10 @@
       chart = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: hours,
+          labels: times,
           datasets: [{
             label: `Temperature at ${place}`,
-            data: temps,
+            data: series,
             borderColor: 'rgb(255,0,0)',
             backgroundColor: 'rgba(255,0,0,0.15)',
             borderWidth: 2,
@@ -230,6 +220,28 @@
         },
         options: { responsive: true, maintainAspectRatio: false }
       });
+    });
+
+    // --- On map load: extract times automatically ---
+    map.on("load", async () => {
+      $status.textContent = "loading times…";
+
+      // Fetch one tile & collect unique times
+      const feats = map.querySourceFeatures("temps", {sourceLayer: LAYER_NAME});
+      times = [...new Set(feats.map(f => f.properties.time))].sort();
+
+      if (times.length === 0) {
+        $status.textContent = "no data!";
+        return;
+      }
+
+      $hour.max = times.length - 1;
+      $hour.value = 0;
+      $hourLabel.textContent = times[0];
+
+      applyFilters();
+      applyPaint();
+      $status.textContent = "ready";
     });
   </script>
 </body>
