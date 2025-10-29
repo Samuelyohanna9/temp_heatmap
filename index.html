@@ -64,25 +64,21 @@
     import Pbf from "https://esm.sh/pbf@3.2.1";
     import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
-    // PMTiles protocol for MapLibre
+    // Register PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // PMTiles archive for direct tile decode
-    const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
-    const archive = new pmtiles.PMTiles(PMTILES_URL);
+    // URLs for your datasets
+    const PMTILES_BASEMAP = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
+    const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles"; // change if needed
 
     // Config
     const LAYER_NAME = "temps";
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-
-    // Decode settings (zoom-independent chart)
     const DECODE_ZOOM = 14;
     const EPS = 1e-5;
-
-    // 24h labels
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // UI refs
@@ -97,7 +93,6 @@
       return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
     }
 
-    // Slippy helpers
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor(
@@ -105,19 +100,17 @@
       );
       return { x, y };
     }
+
     function wrap(n, mod) { return ((n % mod) + mod) % mod; }
 
-    // Haversine distance (meters)
     function haversine(lon1, lat1, lon2, lat2) {
       const R = 6371000;
       const toRad = d => d * Math.PI/180;
       const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*sin2(dLon/2);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
       return 2*R*Math.asin(Math.sqrt(a));
-      function sin2(x){return Math.sin(x)*Math.sin(x);}
     }
 
-    // Decode a tile to point GeoJSON features
     function decodeTileToPoints(z, x, y) {
       return archive.getZxy(z, x, y).then(resp => {
         if (!resp || !resp.data) return [];
@@ -125,7 +118,7 @@
         const layer = vt.layers[LAYER_NAME];
         if (!layer) return [];
         const feats = [];
-        for (let i=0; i<layer.length; i++) {
+        for (let i = 0; i < layer.length; i++) {
           const f = layer.feature(i).toGeoJSON(x, y, z);
           if (f.geometry?.type === "Point") feats.push(f);
         }
@@ -133,15 +126,20 @@
       }).catch(() => []);
     }
 
-    // Nearest feature (respect selected place if set)
     async function findNearestFeature(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const max = Math.pow(2, DECODE_ZOOM);
       const coords = [];
-      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
-        coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
-      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
-      const all = placeFilter ? chunks.flat().filter(g => g.properties?.place === placeFilter) : chunks.flat();
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          coords.push([ wrap(x+dx, max), wrap(y+dy, max) ]);
+        }
+      }
+      const chunks = await Promise.all(coords.map(([tx, ty]) =>
+        decodeTileToPoints(DECODE_ZOOM, tx, ty)
+      ));
+      let all = chunks.flat();
+      if (placeFilter) all = all.filter(g => g.properties?.place === placeFilter);
       let best = null, bestD = Infinity;
       for (const g of all) {
         const [gx, gy] = g.geometry.coordinates;
@@ -151,7 +149,6 @@
       return best;
     }
 
-    // Build timeseries at coord, optionally restricted to place
     async function loadTimeseriesAtCoord(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
@@ -167,79 +164,85 @@
       return map;
     }
 
-    // Map
     const map = new maplibregl.Map({
       container: "map",
       center: INIT_CENTER,
       zoom: INIT_ZOOM,
+      maxZoom: 22,
       style: {
         version: 8,
+        glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
         sources: {
           basemap: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256
+            type: "vector",
+            url: `pmtiles://${PMTILES_BASEMAP}`,
+            minzoom: 0,
+            maxzoom: 14
           },
           temps: {
             type: "vector",
-            url: `pmtiles://${PMTILES_URL}`,
+            url: `pmtiles://${PMTILES_TEMPS}`,
             minzoom: 8
           }
         },
-        layers: [
-          { id: "basemap", type: "raster", source: "basemap" },
-
-          // Heatmap: intensity 0.5 (as requested), zoom-based radius, 24→36°C weighting
-          {
-            id: "heat",
-            type: "heatmap",
-            source: "temps",
-            "source-layer": LAYER_NAME,
-            minzoom: 8,
-            paint: {
-              "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 24, 0, 36, 1],
-              "heatmap-radius": [
-                "interpolate", ["linear"], ["zoom"],
-                8, 6,
-                10, 10,
-                12, 18,
-                14, 26,
-                16, 30
-              ],
-              "heatmap-intensity": 0.5,              /* << reduced intensity */
-              "heatmap-opacity": 0.9,
-              "heatmap-color": [
-                "interpolate", ["linear"], ["heatmap-density"],
-                0.0, "rgba(0,255,0,0)",
-                0.3, "rgb(0,255,0)",
-                0.6, "rgb(255,255,0)",
-                1.0, "rgb(255,0,0)"
-              ]
-            },
-            filter: ["==", ["get", "time"], `${DATE}T19:00`]
-          },
-
-          // Invisible picking layer for hover/click
-          {
-            id: "points",
-            type: "circle",
-            source: "temps",
-            "source-layer": LAYER_NAME,
-            minzoom: 8,
-            paint: {
-              "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 8, 12, 5, 16, 3],
-              "circle-color": "rgba(0,0,0,0)",
-              "circle-stroke-width": 0,
-              "circle-stroke-color": "rgba(0,0,0,0)"
-            },
-            filter: ["==", ["get", "time"], `${DATE}T19:00`]
-          }
-        ]
+        layers: []
       }
     });
 
+    map.on("load", () => {
+      $status.textContent = "ready";
+
+      // Add basemap layers (Protomaps theme)
+      import("https://unpkg.com/protomaps-themes-base@2.0.1/dist/index.js").then(ptheme => {
+        const layers = ptheme.layers({ source: "basemap" });
+        for (const layer of layers) map.addLayer(layer);
+      });
+
+      // Add heatmap layer
+      map.addLayer({
+        id: "heat",
+        type: "heatmap",
+        source: "temps",
+        "source-layer": LAYER_NAME,
+        paint: {
+          "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0,36,1],
+          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6,10,10,12,18,14,26,16,30],
+          "heatmap-intensity": 0.5,
+          "heatmap-opacity": 0.9,
+          "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
+            0.0, "rgba(0,255,0,0)",
+            0.3, "rgb(0,255,0)",
+            0.6, "rgb(255,255,0)",
+            1.0, "rgb(255,0,0)"
+          ]
+        },
+        filter: ["==", ["get","time"], currentTimeStr()]
+      });
+
+      // Add invisible picking layer
+      map.addLayer({
+        id: "points",
+        type: "circle",
+        source: "temps",
+        "source-layer": LAYER_NAME,
+        minzoom: 8,
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 8,8,12,5,16,3],
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-stroke-width": 0,
+          "circle-stroke-color": "rgba(0,0,0,0)"
+        },
+        filter: ["==", ["get","time"], currentTimeStr()]
+      });
+
+      // Attach UI handlers
+      $hour.addEventListener("input", applyFilters);
+      $place.addEventListener("change", applyFilters);
+      applyFilters();
+    });
+
     function buildFilter() {
-      const timeFilter = ["==", ["get", "time"], currentTimeStr()];
+      const timeFilter = ["==", ["get","time"], currentTimeStr()];
       const p = $place.value;
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
@@ -257,16 +260,7 @@
       }
     }
 
-    $hour.addEventListener("input", applyFilters);
-    $place.addEventListener("change", applyFilters);
-
-    map.on("load", () => {
-      $status.textContent = "ready";
-      applyFilters();
-    });
-
-    // Hover popup (shows place too)
-    let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+    let popup = new maplibregl.Popup({ closeButton:false, closeOnClick:false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
@@ -277,11 +271,9 @@
         .addTo(map);
     });
 
-    // Click -> 24h series for nearest coordinate, restricted by selected place (if any)
     map.on("click", async (e) => {
       try {
         const placeFilter = $place.value === "__all__" ? null : $place.value;
-
         let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
         if (placeFilter) features = features.filter(ft => ft.properties?.place === placeFilter);
 
@@ -320,26 +312,26 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            scales: { x: { ticks: { autoSkip: true, maxTicksLimit: 12 } } },
+            scales: { x: { ticks: { autoSkip:true, maxTicksLimit:12 } } },
             plugins: {
-              legend: { display: true },
+              legend: { display:true },
               annotation: {
                 annotations: {
                   selectedHour: {
-                    type: 'line',
-                    scaleID: 'x',
+                    type:'line',
+                    scaleID:'x',
                     value: currentTimeStr(),
-                    borderColor: 'blue',
-                    borderWidth: 2,
-                    label: { content: `Hour ${$hour.value}:00`, enabled: true, position: 'start' }
+                    borderColor:'blue',
+                    borderWidth:2,
+                    label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
                   }
                 }
               }
             }
           }
         });
-      } catch (err) {
-        console.error("Click / decode error:", err);
+      } catch(err) {
+        console.error("Click/decode error:", err);
         chartContainer.style.display = "none";
       }
     });
