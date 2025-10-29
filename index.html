@@ -23,7 +23,7 @@
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
     #chartContainer {
-      position:absolute;top:10px;right:10px;width:360px;height:240px;
+      position:absolute;top:10px;right:10px;width:340px;height:240px;
       background:#fff;opacity:0.95;padding:10px;border-radius:8px;
       display:none;z-index:20;
     }
@@ -69,13 +69,14 @@
 
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.4.0"></script>
 
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
-    import Pbf from "https://cdn.jsdelivr.net/npm/pbf@3.2.1/dist/pbf.js";
-    import { VectorTile } from "https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@1.3.1/dist/vector-tile.js";
+    import Pbf from "https://cdn.jsdelivr.net/npm/pbf@3.2.1/index.js";
+    import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
+    // PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
@@ -181,19 +182,7 @@
       applyPaint();
     });
 
-    // Hover popup
-    let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
-    map.on("mousemove", (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-      if (!features.length) { popup.remove(); return; }
-      const f = features[0];
-      const { value, time, place } = f.properties;
-      popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}<br>${place}`)
-        .addTo(map);
-    });
-
-    // Helpers for tile decode
+    // Helpers to compute tile index
     function lonLatToTile(lon, lat, z) {
       const x = Math.floor((lon + 180) / 360 * Math.pow(2, z));
       const y = Math.floor(
@@ -204,7 +193,19 @@
     function roundN(x, n=5){ const p = 10**n; return Math.round(x*p)/p; }
     const coordKey = (c) => `${roundN(c[0])}|${roundN(c[1])}`;
 
-    // Click = time series chart
+    // Hover popup
+    let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+    map.on("mousemove", (e) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+      if (!features.length) { popup.remove(); return; }
+      const f = features[0];
+      const { value, time, place } = f.properties;
+      popup.setLngLat(e.lngLat)
+        .setHTML(`<strong>${value.toFixed(1)}°C</strong><br>${time}<br>${place}`)
+        .addTo(map);
+    });
+
+    // Click = fetch all times for that coordinate
     map.on("click", async (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
@@ -226,19 +227,16 @@
       const pairs = [];
       for (let i = 0; i < layer.length; i++) {
         const ft = layer.feature(i);
-        const geom = ft.loadGeometry();
-        const pt = geom[0][0];
+        const geom = ft.loadGeometry()[0][0];
         const extent = layer.extent || 4096;
-        const lon2 = (pt.x / extent + x) / Math.pow(2,z) * 360 - 180;
-        const n = Math.PI - 2*Math.PI*(y + pt.y/extent)/Math.pow(2,z);
+        const lon2 = (geom.x / extent + x) / Math.pow(2, z) * 360 - 180;
+        const n = Math.PI - 2*Math.PI*(y + geom.y / extent) / Math.pow(2, z);
         const lat2 = (180/Math.PI) * Math.atan(0.5*(Math.exp(n)-Math.exp(-n)));
-
         if (coordKey([lon2, lat2]) === key) {
           const props = ft.properties;
           pairs.push({ t: props.time, v: props.value });
         }
       }
-
       if (!pairs.length) { chartContainer.style.display = "none"; return; }
 
       pairs.sort((a,b)=> a.t.localeCompare(b.t));
@@ -261,23 +259,7 @@
             pointRadius: 3
           }]
         },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: {
-            annotation: {
-              annotations: {
-                hourLine: {
-                  type: 'line',
-                  xMin: Number($hour.value),
-                  xMax: Number($hour.value),
-                  borderColor: 'blue', borderWidth: 2,
-                  label: { enabled: true, content: 'selected' }
-                }
-              }
-            }
-          },
-          scales: { y: { title: { display: true, text: "°C" } } }
-        }
+        options: { responsive: true, maintainAspectRatio: false }
       });
     });
   </script>
