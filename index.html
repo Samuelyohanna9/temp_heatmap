@@ -11,7 +11,7 @@
     #ui {
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
-      font: 14px/1.25 system-ui, sans-serif;
+      font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
     }
     #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
@@ -23,7 +23,7 @@
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
     #chartContainer {
-      position:absolute;top:10px;right:10px;width:380px;height:260px;
+      position:absolute;top:10px;right:10px;width:360px;height:240px;
       background:#fff;opacity:0.95;padding:10px;border-radius:8px;
       display:none;z-index:20;
     }
@@ -64,13 +64,10 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.4.0"></script>
 
-  <!-- Needed for decoding tiles -->
   <script type="module">
     import * as pmtiles from "https://unpkg.com/pmtiles@3.0.7/dist/index.js";
-    import Pbf from "https://esm.sh/pbf@3.2.1";
-    import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
-    // Register pmtiles with MapLibre
+    // Register pmtiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
@@ -127,7 +124,12 @@
             type: "circle",
             source: "temps",
             "source-layer": LAYER_NAME,
-            paint: { "circle-radius": 3, "circle-color": "rgba(0,0,0,0)" },
+            paint: {
+              "circle-radius": 3,
+              "circle-color": "rgba(0,0,0,0)",  
+              "circle-stroke-width": 1,
+              "circle-stroke-color": "rgba(0,0,0,0)"
+            },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           }
         ]
@@ -183,30 +185,28 @@
         .addTo(map);
     });
 
-    // Click = full timeseries using PMTiles archive (not zoom dependent!)
+    // Helper: lon/lat -> tile coords
+    function lonlatToTile(lon, lat, zoom) {
+      const x = Math.floor(((lon + 180) / 360) * Math.pow(2, zoom));
+      const y = Math.floor(
+        (1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)
+      );
+      return { x, y };
+    }
+
+    // Click = time series for exact coordinates
     map.on("click", async (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { chartContainer.style.display = "none"; return; }
       const f = features[0];
       const [lng, lat] = f.geometry.coordinates;
 
-      // Decode across zoom levels (small range is enough)
-      const feats = [];
-      for (let z = 8; z <= 12; z++) {
-        const tileID = pmtiles.util.lonlatToTile(lng, lat, z);
-        const t = await archive.getZxy(z, tileID.x, tileID.y);
-        if (!t) continue;
-        const vt = new VectorTile(new Pbf(t.data));
-        if (vt.layers[LAYER_NAME]) {
-          for (let i = 0; i < vt.layers[LAYER_NAME].length; i++) {
-            const feat = vt.layers[LAYER_NAME].feature(i).toGeoJSON(tileID.x, tileID.y, z);
-            if (Math.abs(feat.geometry.coordinates[0] - lng) < 1e-6 &&
-                Math.abs(feat.geometry.coordinates[1] - lat) < 1e-6) {
-              feats.push(feat);
-            }
-          }
-        }
-      }
+      // Force reading data from all zoom levels at that point
+      const feats = map.querySourceFeatures("temps", { sourceLayer: LAYER_NAME })
+        .filter(ft => {
+          const [x, y] = ft.geometry.coordinates;
+          return Math.abs(x - lng) < 1e-6 && Math.abs(y - lat) < 1e-6;
+        });
 
       const uniqueTimes = [...new Set(feats.map(ft => ft.properties.time))].sort();
       const series = uniqueTimes.map(t => {
