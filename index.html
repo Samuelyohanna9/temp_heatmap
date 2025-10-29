@@ -69,11 +69,10 @@
     import Pbf from "https://esm.sh/pbf@3.2.1";
     import { VectorTile } from "https://esm.sh/@mapbox/vector-tile@1.3.1";
 
-    // PMTiles protocol for MapLibre
+    // Map + PMTiles
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    // PMTiles archive reference for direct tile decode
     const PMTILES_URL = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const archive = new pmtiles.PMTiles(PMTILES_URL);
 
@@ -82,10 +81,8 @@
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
-    const DECODE_ZOOM = 14;   // decode at z=14 so we get the exact point's full time series
-    const EPS = 1e-6;         // coordinate match tolerance
-
-    // 24-hour labels
+    const DECODE_ZOOM = 14;      // fixed decode zoom
+    const EPS = 1e-5;            // coordinate match tolerance in degrees (~1 m)
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // UI refs
@@ -103,7 +100,7 @@
       return `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
     }
 
-    // Slippy formula
+    // Slippy helpers
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor(
@@ -111,33 +108,65 @@
       );
       return { x, y };
     }
+    function wrap(n, mod) { return ((n % mod) + mod) % mod; }
 
-    // Decode one MVT tile and return features for the clicked lon/lat (exact point across all hours)
-    async function loadTimeseriesFromTile(lon, lat) {
+    // Haversine distance (meters)
+    function haversine(lon1, lat1, lon2, lat2) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI/180;
+      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(a));
+    }
+
+    // Decode one tile and return all GeoJSON point features
+    function decodeTileToPoints(z, x, y) {
+      return archive.getZxy(z, x, y).then(resp => {
+        if (!resp || !resp.data) return [];
+        const vt = new VectorTile(new Pbf(new Uint8Array(resp.data)));
+        const layer = vt.layers[LAYER_NAME];
+        if (!layer) return [];
+        const feats = [];
+        for (let i=0; i<layer.length; i++) {
+          const f = layer.feature(i).toGeoJSON(x, y, z);
+          if (f.geometry?.type === "Point") feats.push(f);
+        }
+        return feats;
+      }).catch(() => []);
+    }
+
+    // Find nearest feature to lon/lat by decoding clicked tile + 8 neighbors at DECODE_ZOOM
+    async function findNearestFeature(lon, lat) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
-      const resp = await archive.getZxy(DECODE_ZOOM, x, y);
-      if (!resp || !resp.data) return new Map(); // empty
+      const max = Math.pow(2, DECODE_ZOOM);
+      const coords = [];
+      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
+        coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
+      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
+      const all = chunks.flat();
+      let best = null, bestD = Infinity;
+      for (const g of all) {
+        const [gx, gy] = g.geometry.coordinates;
+        const d = haversine(lon, lat, gx, gy);
+        if (d < bestD) { best = g; bestD = d; }
+      }
+      return best; // may be null if empty
+    }
 
-      const tile = new VectorTile(new Pbf(new Uint8Array(resp.data)));
-      const layer = tile.layers[LAYER_NAME];
-      if (!layer) return new Map();
-
-      // Collect properties by time for features whose point equals clicked lon/lat
-      const byTime = new Map();
-      for (let i = 0; i < layer.length; i++) {
-        const feat = layer.feature(i);
-        const gj = feat.toGeoJSON(x, y, DECODE_ZOOM); // GeoJSON with lon/lat coords
-        if (gj.geometry && gj.geometry.type === "Point") {
-          const [fx, fy] = gj.geometry.coordinates;
-          if (Math.abs(fx - lon) < EPS && Math.abs(fy - lat) < EPS) {
-            const props = gj.properties || {};
-            if (props.time && typeof props.value !== "undefined") {
-              byTime.set(props.time, Number(props.value));
-            }
-          }
+    // Build timeseries map for the exact coordinate (matches all hours at that point)
+    async function loadTimeseriesAtCoord(lon, lat) {
+      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
+      const pts = await decodeTileToPoints(DECODE_ZOOM, x, y);
+      const map = new Map();
+      for (const f of pts) {
+        const [fx, fy] = f.geometry.coordinates;
+        const t = f.properties?.time;
+        const v = f.properties?.value;
+        if (t && typeof v !== "undefined" && Math.abs(fx-lon) < EPS && Math.abs(fy-lat) < EPS) {
+          map.set(t, Number(v));
         }
       }
-      return byTime;
+      return map;
     }
 
     // Map
@@ -161,7 +190,6 @@
         },
         layers: [
           { id: "basemap", type: "raster", source: "basemap" },
-
           {
             id: "heat",
             type: "heatmap",
@@ -169,12 +197,10 @@
             "source-layer": LAYER_NAME,
             minzoom: 8,
             paint: {
-              // weight by temperature (adjust domain to your climate)
               "heatmap-weight": ["interpolate", ["linear"], ["get", "value"], 24, 0, 36, 1],
               "heatmap-radius": 26,
               "heatmap-intensity": 1.0,
               "heatmap-opacity": 0.9,
-              // green → yellow → red
               "heatmap-color": [
                 "interpolate", ["linear"], ["heatmap-density"],
                 0.0, "rgba(0,255,0,0)",
@@ -185,8 +211,6 @@
             },
             filter: ["==", ["get", "time"], `${DATE}T19:00`]
           },
-
-          // invisible points for hover/click picking
           {
             id: "points",
             type: "circle",
@@ -194,12 +218,7 @@
             "source-layer": LAYER_NAME,
             minzoom: 8,
             paint: {
-              "circle-radius": [
-                "interpolate", ["linear"], ["zoom"],
-                8, 6,
-                12, 4,
-                16, 3
-              ],
+              "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 8, 12, 5, 16, 3],
               "circle-color": "rgba(0,0,0,0)",
               "circle-stroke-width": 0,
               "circle-stroke-color": "rgba(0,0,0,0)"
@@ -216,14 +235,12 @@
       map.setFilter("points", timeFilter);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
 
-      // If a chart is open, move the blue line to the new hour
       if (chart) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
         chart.update('none');
       }
     }
-
     function applyPaint() {
       map.setPaintProperty("heat", "heatmap-radius", Number($radius.value));
       map.setPaintProperty("heat", "heatmap-intensity", Number($intensity.value));
@@ -241,7 +258,7 @@
       applyPaint();
     });
 
-    // Hover popup using rendered features (fast)
+    // Hover popup (fast, uses rendered points)
     let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -253,17 +270,24 @@
         .addTo(map);
     });
 
-    // Click → decode PMTiles tile at z=14, gather full 24h series for the exact coordinate
+    // Click: prefer rendered point; if none, find nearest by decoding tiles; then build 24h series at that exact coord
     map.on("click", async (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
-      if (!features.length) { chartContainer.style.display = "none"; return; }
-
-      const f = features[0];
-      const [lng, lat] = f.geometry.coordinates;
-
       try {
-        const byTime = await loadTimeseriesFromTile(lng, lat);  // <- independent of current zoom
-        // Build series aligned to hours24 (null where missing)
+        let features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
+        let seedCoord;
+
+        if (features.length) {
+          seedCoord = features[0].geometry.coordinates; // [lng, lat]
+        } else {
+          // Fallback: find nearest feature to click, independent of zoom/viewport
+          const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat);
+          if (!nearest) { chartContainer.style.display = "none"; return; }
+          seedCoord = nearest.geometry.coordinates;
+        }
+
+        const [lng, lat] = seedCoord;
+        const byTime = await loadTimeseriesAtCoord(lng, lat);
+
         const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
 
         chartContainer.style.display = "block";
@@ -288,9 +312,7 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            scales: {
-              x: { ticks: { autoSkip: true, maxTicksLimit: 12 } }
-            },
+            scales: { x: { ticks: { autoSkip: true, maxTicksLimit: 12 } } },
             plugins: {
               legend: { display: true },
               annotation: {
@@ -301,11 +323,7 @@
                     value: currentTimeStr(),
                     borderColor: 'blue',
                     borderWidth: 2,
-                    label: {
-                      content: `Hour ${$hour.value}:00`,
-                      enabled: true,
-                      position: 'start'
-                    }
+                    label: { content: `Hour ${$hour.value}:00`, enabled: true, position: 'start' }
                   }
                 }
               }
@@ -313,7 +331,7 @@
           }
         });
       } catch (err) {
-        console.error("PMTiles decode error:", err);
+        console.error("Click / decode error:", err);
         chartContainer.style.display = "none";
       }
     });
