@@ -12,11 +12,13 @@
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 12px; border-radius: 10px;
       font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 320px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.12); width: 330px;
     }
     #ui label { display: block; margin: 8px 0 4px; font-weight: 600; }
     #ui .row { display: flex; gap: 8px; align-items: center; }
     #ui .row input[type=range] { flex: 1; }
+    .small { font-size: 12px; opacity:.75; }
+    .grid { display:grid; grid-template-columns: 1fr auto; gap:6px 8px; align-items:center; }
     #badge {
       position: absolute; bottom: 10px; left: 10px; z-index: 10;
       background: #fff; padding: 6px 8px; border-radius: 8px;
@@ -27,6 +29,9 @@
       background:#fff; opacity:0.95; padding:10px; border-radius:8px;
       display:none; z-index:20;
     }
+    input[type=number]{ width:90px; }
+    select, input[type=number]{ padding:4px 6px; }
+    .divider{ height:1px; background:#e5e7eb; margin:10px 0; }
   </style>
 </head>
 <body>
@@ -35,7 +40,7 @@
   <div id="ui">
     <div class="row" style="justify-content:space-between;">
       <strong>Temperature Heatmap</strong>
-      <span id="status" style="opacity:.7;">loading…</span>
+      <span id="status" class="small">loading…</span>
     </div>
 
     <label for="hour">Hour</label>
@@ -50,6 +55,59 @@
       <option value="sparafucile">sparafucile</option>
       <option value="parcote">parcote</option>
     </select>
+
+    <div class="divider"></div>
+    <strong>Visualization</strong>
+
+    <div class="grid">
+      <label for="radiusBase">Radius (px @ z12)</label>
+      <div class="row">
+        <input id="radiusBase" type="range" min="5" max="60" step="1" value="16" />
+        <span id="radiusBaseVal" style="width:44px; text-align:right;">16</span>
+      </div>
+
+      <label for="radiusHigh">Radius (px @ z16)</label>
+      <div class="row">
+        <input id="radiusHigh" type="range" min="10" max="80" step="1" value="36" />
+        <span id="radiusHighVal" style="width:44px; text-align:right;">36</span>
+      </div>
+
+      <label for="intensity">Intensity</label>
+      <div class="row">
+        <input id="intensity" type="range" min="0" max="3" step="0.05" value="0.9" />
+        <span id="intensityVal" style="width:44px; text-align:right;">0.90</span>
+      </div>
+
+      <label for="opacity">Opacity</label>
+      <div class="row">
+        <input id="opacity" type="range" min="0" max="1" step="0.05" value="0.95" />
+        <span id="opacityVal" style="width:44px; text-align:right;">0.95</span>
+      </div>
+
+      <label for="ramp">Color ramp</label>
+      <select id="ramp">
+        <option value="gyr" selected>Green → Yellow → Red</option>
+        <option value="bwyr">Blue → Cyan → Yellow → Red</option>
+        <option value="fire">Dark → Orange → White</option>
+        <option value="gray">Transparent → Gray → Black</option>
+      </select>
+
+      <label>Scale mode</label>
+      <select id="scaleMode">
+        <option value="auto" selected>Auto (per hour + place)</option>
+        <option value="fixed">Fixed</option>
+      </select>
+
+      <label class="small">Fixed min/max (°C)</label>
+      <div class="row">
+        <input id="fixedMin" type="number" step="0.1" value="24">
+        <input id="fixedMax" type="number" step="0.1" value="36">
+      </div>
+    </div>
+
+    <div class="small" style="margin-top:6px;">
+      Tip: Auto scale stretches current hour’s values to full color range. Fixed keeps colors consistent.
+    </div>
   </div>
 
   <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
@@ -69,15 +127,15 @@
 
   <script>
     // --- Config ---
-    const PMTILES_BASEMAP = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
-    const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
+    const PMTILES_BASEMAP = "pmtiles://https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
+    const PMTILES_TEMPS   = "pmtiles://https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const LAYER_NAME = "temps";
     const DATE = "2025-07-23";
     const INIT_CENTER = [10.80, 45.16];
     const INIT_ZOOM = 12.2;
     const DECODE_ZOOM = 14;
     const CLICK_MAX_M = 60;
-    // Dataset bounds from your PMTiles metadata (minLon, minLat, maxLon, maxLat)
+    // Dataset bounds from PMTiles metadata (minLon, minLat, maxLon, maxLat)
     const DATA_BOUNDS = [10.785482, 45.145304, 10.814915, 45.167814];
 
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
@@ -89,13 +147,25 @@
     const $hourLabel = document.getElementById("hourLabel");
     const $place = document.getElementById("place");
     const chartContainer = document.getElementById("chartContainer");
+    const $radiusBase = document.getElementById("radiusBase");
+    const $radiusHigh = document.getElementById("radiusHigh");
+    const $radiusBaseVal = document.getElementById("radiusBaseVal");
+    const $radiusHighVal = document.getElementById("radiusHighVal");
+    const $intensity = document.getElementById("intensity");
+    const $intensityVal = document.getElementById("intensityVal");
+    const $opacity = document.getElementById("opacity");
+    const $opacityVal = document.getElementById("opacityVal");
+    const $ramp = document.getElementById("ramp");
+    const $scaleMode = document.getElementById("scaleMode");
+    const $fixedMin = document.getElementById("fixedMin");
+    const $fixedMax = document.getElementById("fixedMax");
     let chart = null;
 
     // --- PMTiles protocol ---
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
-    const archiveTemps = new pmtiles.PMTiles(PMTILES_TEMPS);
-    const archiveBase  = new pmtiles.PMTiles(PMTILES_BASEMAP);
+    const archiveTemps = new pmtiles.PMTiles(PMTILES_TEMPS.replace("pmtiles://",""));
+    const archiveBase  = new pmtiles.PMTiles(PMTILES_BASEMAP.replace("pmtiles://",""));
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
@@ -105,14 +175,6 @@
       const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z));
       return { x, y };
     }
-    function tileToLonLatBounds(x, y, z) {
-      const n = Math.pow(2, z);
-      const lon1 = x / n * 360 - 180;
-      const lat1 = (Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180) / Math.PI;
-      const lon2 = (x + 1) / n * 360 - 180;
-      const lat2 = (Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180) / Math.PI;
-      return [lon1, lat2, lon2, lat1]; // [minLon, minLat, maxLon, maxLat]
-    }
     const wrap = (n, mod) => ((n % mod) + mod) % mod;
     function haversine(lon1, lat1, lon2, lat2) {
       const R = 6371000, toRad = d => d*Math.PI/180;
@@ -121,7 +183,6 @@
       return 2*R*Math.asin(Math.sqrt(a));
     }
 
-    // decode a single pmtiles tile to features
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
@@ -138,7 +199,6 @@
       } catch { return []; }
     }
 
-    // decode all tiles that cover DATA_BOUNDS at DECODE_ZOOM
     async function decodeBoundsToPoints(bounds = DATA_BOUNDS, z = DECODE_ZOOM) {
       const [minLon, minLat, maxLon, maxLat] = bounds;
       const tl = lonlatToTile(minLon, maxLat, z);
@@ -159,9 +219,7 @@
       return chunks.flat();
     }
 
-    // pick nearby feature (for clicking)
     async function pickNearbyFeature(lon, lat, placeFilter) {
-      // For picking, a small 3x3 neighborhood is enough:
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const n = Math.pow(2, DECODE_ZOOM);
       const coords = [];
@@ -208,11 +266,11 @@
       sources: {
         [basemapSourceId]: {
           type: "vector",
-          url: "pmtiles://" + PMTILES_BASEMAP,
+          url: PMTILES_BASEMAP,
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8 }
+        temps: { type: "vector", url: PMTILES_TEMPS, minzoom: 8 }
       },
       layers: (window.basemaps
         ? window.basemaps.layers(basemapSourceId, window.basemaps.namedFlavor("light"), { lang: "en" })
@@ -232,14 +290,11 @@
     }
 
     // --- GLOBAL per-hour/per-place min/max cache ---
-    // key = `${hour}|${placeValue}` where placeValue is actual place OR "__all__"
     const globalMinMaxCache = new Map();
-
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
       if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
 
-      // Decode all tiles covering dataset bounds once per (hour,place)
       const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
       const filtered = all.filter(f =>
         f.properties?.time === hourStr &&
@@ -263,22 +318,91 @@
         globalMinMaxCache.set(key, fallback);
         return fallback;
       }
-      if (minVal === maxVal) maxVal = minVal + 0.1; // avoid degenerate scale
+      if (minVal === maxVal) maxVal = minVal + 0.1;
       const res = { min: minVal, max: maxVal };
       globalMinMaxCache.set(key, res);
       return res;
     }
 
-    async function applyGlobalHeatScale() {
+    // --- Color ramps ---
+    function rampExpr(kind) {
+      switch(kind){
+        case "bwyr": // Blue->Cyan->Yellow->Red
+          return ["interpolate", ["linear"], ["heatmap-density"],
+            0.00, "rgba(0,0,0,0)",
+            0.10, "rgb(49,54,149)",
+            0.30, "rgb(69,117,180)",
+            0.50, "rgb(116,173,209)",
+            0.70, "rgb(253,174,97)",
+            1.00, "rgb(215,48,39)"
+          ];
+        case "fire": // Dark->Orange->White
+          return ["interpolate", ["linear"], ["heatmap-density"],
+            0.00, "rgba(0,0,0,0)",
+            0.10, "rgb(30,15,15)",
+            0.40, "rgb(191,87,0)",
+            0.70, "rgb(255,140,0)",
+            1.00, "rgb(255,255,255)"
+          ];
+        case "gray":
+          return ["interpolate", ["linear"], ["heatmap-density"],
+            0.00, "rgba(0,0,0,0)",
+            0.25, "rgb(200,200,200)",
+            0.50, "rgb(150,150,150)",
+            0.75, "rgb(100,100,100)",
+            1.00, "rgb(30,30,30)"
+          ];
+        case "gyr":
+        default:
+          return ["interpolate", ["linear"], ["heatmap-density"],
+            0.00, "rgba(0,255,0,0)",
+            0.30, "rgb(0,255,0)",
+            0.60, "rgb(255,255,0)",
+            1.00, "rgb(255,0,0)"
+          ];
+      }
+    }
+
+    async function applyScaleToHeat() {
       if (!map.getLayer("heat")) return;
-      const hourStr = currentTimeStr();
-      const placeValue = $place.value; // "__all__" or specific place
-      const { min, max } = await getGlobalMinMaxFor(hourStr, placeValue);
-      map.setPaintProperty("heat", "heatmap-weight", [
-        "interpolate", ["linear"], ["get","value"],
-        min, 0,
-        max, 1
-      ]);
+      const mode = $scaleMode.value;
+      let min = Number($fixedMin.value), max = Number($fixedMax.value);
+
+      if (mode === "auto") {
+        const { min: mi, max: ma } = await getGlobalMinMaxFor(currentTimeStr(), $place.value);
+        min = mi; max = ma;
+      }
+      if (!(Number.isFinite(min) && Number.isFinite(max))) { min = 24; max = 36; }
+      if (min === max) max = min + 0.1;
+
+      map.setPaintProperty("heat", "heatmap-weight",
+        ["interpolate", ["linear"], ["get","value"], min, 0, max, 1]
+      );
+    }
+
+    function applyVisualControls() {
+      if (!map.getLayer("heat")) return;
+
+      // Radius interpolation (zoom-constant feel)
+      const r12 = Number($radiusBase.value);
+      const r16 = Number($radiusHigh.value);
+      $radiusBaseVal.textContent = r12;
+      $radiusHighVal.textContent = r16;
+
+      map.setPaintProperty("heat", "heatmap-radius",
+        ["interpolate", ["linear"], ["zoom"], 10, Math.max(4, r12*0.8), 12, r12, 14, (r12+r16)/2, 16, r16, 18, Math.max(r16, r16*1.2)]
+      );
+
+      // Intensity / Opacity
+      const intensity = Number($intensity.value);
+      const opacity = Number($opacity.value);
+      $intensityVal.textContent = intensity.toFixed(2);
+      $opacityVal.textContent = opacity.toFixed(2);
+      map.setPaintProperty("heat", "heatmap-intensity", intensity);
+      map.setPaintProperty("heat", "heatmap-opacity", opacity);
+
+      // Color ramp
+      map.setPaintProperty("heat", "heatmap-color", rampExpr($ramp.value));
     }
 
     async function applyFilters() {
@@ -287,9 +411,9 @@
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
 
-      await applyGlobalHeatScale(); // stable across zoom (per hour+place)
+      await applyScaleToHeat();
+      applyVisualControls();
 
-      // keep chart hour marker in sync
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
@@ -297,7 +421,7 @@
       }
     }
 
-    map.on("load", () => {
+    map.on("load", async () => {
       $status.textContent = "ready";
 
       map.addLayer({
@@ -306,20 +430,16 @@
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
-          // Initial (will be overwritten by applyGlobalHeatScale)
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
-          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6, 10,10, 12,18, 14,26, 16,30],
-          "heatmap-intensity": 0.5,
-          "heatmap-opacity": 0.9,
-          "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
-            0.0, "rgba(0,255,0,0)",
-            0.3, "rgb(0,255,0)",
-            0.6, "rgb(255,255,0)",
-            1.0, "rgb(255,0,0)"]
+          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 10,10, 12,16, 14,24, 16,36, 18,44],
+          "heatmap-intensity": 0.9,
+          "heatmap-opacity": 0.95,
+          "heatmap-color": rampExpr("gyr")
         },
         filter: buildFilter()
       });
 
+      // Invisible picking layer
       map.addLayer({
         id: "points",
         type: "circle",
@@ -330,10 +450,14 @@
         filter: buildFilter()
       });
 
-      $hour.addEventListener("input", applyFilters);
-      $place.addEventListener("change", applyFilters);
+      // UI listeners
+      [$hour, $place, $ramp, $scaleMode, $fixedMin, $fixedMax,
+       $radiusBase, $radiusHigh, $intensity, $opacity].forEach(el => {
+        el.addEventListener("input", applyFilters);
+        el.addEventListener("change", applyFilters);
+      });
 
-      applyFilters();
+      await applyFilters();
     });
 
     // --- Popup (absolute values; coords) ---
