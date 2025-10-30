@@ -116,7 +116,7 @@
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
         if (!resp || !resp.data) return [];
-        const vt = new window.vectorTile.VectorTile(new window.Pbf(new Uint8Array(resp.data)));
+        const vt = new window.vectorTile.VectorTile(new window.Pbf(new Uint8Array(resp.data)]);
         const layer = vt.layers[LAYER_NAME];
         if (!layer) return [];
         const feats = [];
@@ -169,7 +169,9 @@
       const n = Math.pow(2, DECODE_ZOOM);
       const coords = [];
       for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,n), wrap(y+dy,n)]);
-      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)]);
+      const chunks = await Promise.all(
+        coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty))
+      );
       const all = chunks.flat();
       const rows = all.filter(f =>
         String(f.properties?.pixel_id) === String(pixelId) &&
@@ -187,6 +189,7 @@
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
+      // Disable global transitions to avoid zoom “fade”
       transition: { duration: 0, delay: 0 },
       glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
       sprite: "https://protomaps.github.io/basemaps-assets/sprites/v4/light",
@@ -197,7 +200,7 @@
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        // Make tiles available at all zooms; visual comp handles overzoom
+        // IMPORTANT: allow requests at all zooms; we’ll handle overzoom visually
         temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 0, maxzoom: 22 }
       },
       layers: (window.basemaps
@@ -213,8 +216,8 @@
 
       const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
       const filtered = all.filter(f =>
-        // do NOT rely on exact equality here; just cache for the UI scale
-        f.properties?.time && (placeValue === "__all__" || f.properties?.place === placeValue)
+        f.properties?.time === hourStr &&
+        (placeValue === "__all__" || f.properties?.place === placeValue)
       );
 
       if (!filtered.length) {
@@ -255,10 +258,10 @@
       ]);
     }
 
-    // Build filter: **only place** (no strict time equality)
     function buildFilter() {
+      const timeFilter = ["==", ["get","time"], currentTimeStr()];
       const p = $place.value;
-      return (p === "__all__") ? true : ["==", ["get","place"], p];
+      return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
     async function applyFilters() {
@@ -276,7 +279,7 @@
       }
     }
 
-    // --- Map init ---
+    // --- Map init (fadeDuration=0 removes tile cross-fade) ---
     const map = new maplibregl.Map({
       container: "map",
       style,
@@ -292,11 +295,18 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // Zoom gain to offset per-tile normalization
+      // Zoom-based gain to counter per-tile normalization
       const ZGAIN = ["interpolate", ["exponential", 2], ["zoom"],
-        0, 1, 8, 1, 12, 2, 14, 4, 16, 8, 18, 16, 20, 24, 22, 32
+        0, 1,
+        8, 1,
+        12, 2,
+        14, 4,
+        16, 8,
+        18, 16,
+        20, 24,
+        22, 32
       ];
-      const D = ["*", ["heatmap-density"], ZGAIN];
+      const D = ["*", ["heatmap-density"], ZGAIN]; // density scaled by zoom
 
       // --- Heat layer ---
       map.addLayer({
@@ -307,27 +317,45 @@
         minzoom: 0,
         maxzoom: 24,
         paint: {
+          // baseline; overwritten per hour/place by applyGlobalHeatScale()
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24, 0, 36, 1],
 
+          // kernel size with zoom (balanced to avoid specks & over-smoothing)
           "heatmap-radius": ["interpolate", ["exponential", 1.6], ["zoom"],
-            0, 12, 8, 18, 12, 42, 14, 64, 16, 96, 18, 128, 20, 160
+            0, 12,
+            8, 18,
+            12, 42,
+            14, 64,
+            16, 96,
+            18, 128,
+            20, 160
           ],
 
+          // intensity grows with zoom to keep color vivid
           "heatmap-intensity": ["interpolate", ["exponential", 2], ["zoom"],
-            0, 1.0, 8, 1.2, 12, 2.2, 14, 3.8, 16, 6.5, 18, 10, 20, 14
+            0, 1.0,
+            8, 1.2,
+            12, 2.2,
+            14, 3.8,
+            16, 6.5,
+            18, 10,
+            20, 14
           ],
 
+          // fully opaque layer; no fade
           "heatmap-opacity": 1,
 
+          // COLOR RAMP uses zoom-scaled density (D) so it never drops to zero
           "heatmap-color": ["interpolate", ["linear"], D,
             0.00, "rgba(0,0,0,0)",
-            0.005, "rgba(255,255,128,0.55)",
+            0.005, "rgba(255,255,128,0.55)",  /* ultra-low threshold to prevent vanish */
             0.10,  "rgba(255,210,80,0.85)",
             0.35,  "rgb(255,160,0)",
             0.70,  "rgb(255,90,0)",
             1.10,  "rgb(255,0,0)"
           ],
 
+          // valid transitions only (no color-transition on a ramp)
           "heatmap-opacity-transition":   { duration: 0, delay: 0 },
           "heatmap-radius-transition":    { duration: 0, delay: 0 },
           "heatmap-intensity-transition": { duration: 0, delay: 0 }
@@ -335,7 +363,7 @@
         filter: buildFilter()
       });
 
-      // Invisible points for hover/click
+      // Points layer for hover/click (completely invisible)
       map.addLayer({
         id: "points",
         type: "circle",
@@ -343,10 +371,14 @@
         "source-layer": LAYER_NAME,
         minzoom: 0,
         maxzoom: 24,
-        paint: { "circle-opacity": 0, "circle-stroke-opacity": 0 },
+        paint: {
+          "circle-opacity": 0,
+          "circle-stroke-opacity": 0
+        },
         filter: buildFilter()
       });
 
+      // ✅ fixed: the dot before addEventListener
       $hour.addEventListener("input", applyFilters);
       $place.addEventListener("change", applyFilters);
       applyFilters();
