@@ -187,7 +187,6 @@
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
-      // Disable global paint transitions (removes zoom "fade" on style changes)
       transition: { duration: 0, delay: 0 },
       glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
       sprite: "https://protomaps.github.io/basemaps-assets/sprites/v4/light",
@@ -198,7 +197,8 @@
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8 }
+        // add maxzoom so we can render/query at high zooms comfortably
+        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8, maxzoom: 22 }
       },
       layers: (window.basemaps
         ? window.basemaps.layers(basemapSourceId, window.basemaps.namedFlavor("light"), { lang: "en" })
@@ -236,7 +236,7 @@
         globalMinMaxCache.set(key, fallback);
         return fallback;
       }
-      if (minVal === maxVal) maxVal = minVal + 0.1; // avoid degenerate scale
+      if (minVal === maxVal) maxVal = minVal + 0.1;
 
       const res = { min: minVal, max: maxVal };
       globalMinMaxCache.set(key, res);
@@ -246,7 +246,7 @@
     async function applyGlobalHeatScale() {
       if (!map.getLayer("heat")) return;
       const hourStr = currentTimeStr();
-      const placeValue = $place.value; // "__all__" or a place
+      const placeValue = $place.value;
       const { min, max } = await getGlobalMinMaxFor(hourStr, placeValue);
       map.setPaintProperty("heat", "heatmap-weight", [
         "interpolate", ["linear"], ["get","value"],
@@ -276,7 +276,7 @@
       }
     }
 
-    // --- Map init (fadeDuration=0 removes tile cross-fade) ---
+    // --- Map init ---
     const map = new maplibregl.Map({
       container: "map",
       style,
@@ -292,47 +292,45 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // --- Heat layer (zoom-invariant look) ---
+      // --- Heat layer (robust visibility) ---
       map.addLayer({
         id: "heat",
         type: "heatmap",
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
-          // baseline; applyGlobalHeatScale() overwrites per hour/place
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
 
-          // Radius grows ~2^zoom so kernels cover similar meters as you zoom
-          "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"],
-            8, 16,
-            10, 64,
-            12, 256,
-            14, 512,
-            16, 1024
+          // moderate kernel growth with zoom (keeps shape, avoids over-smoothing)
+          "heatmap-radius": ["interpolate", ["exponential", 1.6], ["zoom"],
+            8, 20,
+            12, 48,
+            14, 72,
+            16, 120,
+            18, 180
           ],
 
-          // Intensity also scales with zoom to counter per-tile normalization
-          "heatmap-intensity": ["interpolate", ["exponential", 2], ["zoom"],
-            8, 1,
-            10, 2,
-            12, 4,
-            14, 8,
-            16, 16
+          // boost slightly with zoom; not so strong that peaks flatten
+          "heatmap-intensity": ["interpolate", ["exponential", 1.2], ["zoom"],
+            8, 1.1,
+            12, 1.8,
+            14, 2.6,
+            16, 3.5,
+            18, 4.2
           ],
 
-          // Never fade the layer
           "heatmap-opacity": 1,
 
-          // Hide specks until there’s real neighborhood support
+          // lower the invisible threshold so low densities still appear
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,0,0,0)",
-            0.30, "rgba(0,0,0,0)",
-            0.50, "rgb(255,255,128)",
-            0.75, "rgb(255,128,0)",
+            0.12, "rgba(255,255,128,0.75)",
+            0.35, "rgb(255,180,0)",
+            0.65, "rgb(255,96,0)",
             1.00, "rgb(255,0,0)"
           ],
 
-          // No animated paint transitions
+          // no animated paint transitions
           "heatmap-opacity-transition":   { duration: 0, delay: 0 },
           "heatmap-color-transition":     { duration: 0, delay: 0 },
           "heatmap-radius-transition":    { duration: 0, delay: 0 },
