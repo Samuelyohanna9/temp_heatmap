@@ -198,8 +198,8 @@
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        // Allow overzooming but we’ll compensate visually
-        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8, maxzoom: 22 }
+        // IMPORTANT: allow requests at all zooms; we’ll handle overzoom visually
+        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 0, maxzoom: 22 }
       },
       layers: (window.basemaps
         ? window.basemaps.layers(basemapSourceId, window.basemaps.namedFlavor("light"), { lang: "en" })
@@ -247,7 +247,7 @@
     async function applyGlobalHeatScale() {
       if (!map.getLayer("heat")) return;
       const hourStr = currentTimeStr();
-      const placeValue = $place.value; // "__all__" or a place
+      const placeValue = $place.value;
       const { min, max } = await getGlobalMinMaxFor(hourStr, placeValue);
       map.setPaintProperty("heat", "heatmap-weight", [
         "interpolate", ["linear"], ["get","value"],
@@ -293,9 +293,9 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // Expression helpers inline:
-      // ZGAIN = zoom-based gain to counter density collapse at high zoom.
+      // Zoom-based gain to counter per-tile normalization
       const ZGAIN = ["interpolate", ["exponential", 2], ["zoom"],
+        0, 1,
         8, 1,
         12, 2,
         14, 4,
@@ -304,21 +304,23 @@
         20, 24,
         22, 32
       ];
-      // D = scaled density
-      const D = ["*", ["heatmap-density"], ZGAIN];
+      const D = ["*", ["heatmap-density"], ZGAIN]; // density scaled by zoom
 
-      // --- Heat layer (zoom-compensated density) ---
+      // --- Heat layer ---
       map.addLayer({
         id: "heat",
         type: "heatmap",
         source: "temps",
         "source-layer": LAYER_NAME,
+        minzoom: 0,
+        maxzoom: 24,
         paint: {
-          // baseline; applyGlobalHeatScale() overwrites per hour/place
-          "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
+          // baseline; overwritten per hour/place by applyGlobalHeatScale()
+          "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24, 0, 36, 1],
 
-          // moderate kernel growth; avoid over-smoothing
+          // kernel size with zoom (balanced to avoid specks & over-smoothing)
           "heatmap-radius": ["interpolate", ["exponential", 1.6], ["zoom"],
+            0, 12,
             8, 18,
             12, 42,
             14, 64,
@@ -327,8 +329,9 @@
             20, 160
           ],
 
-          // stronger intensity with zoom to keep colors vivid
+          // intensity grows with zoom to keep color vivid
           "heatmap-intensity": ["interpolate", ["exponential", 2], ["zoom"],
+            0, 1.0,
             8, 1.2,
             12, 2.2,
             14, 3.8,
@@ -337,35 +340,35 @@
             20, 14
           ],
 
-          // keep fully opaque
+          // fully opaque layer; no fade
           "heatmap-opacity": 1,
 
-          // Use D (zoom-scaled density) so the ramp doesn't vanish at high zoom.
+          // COLOR RAMP uses zoom-scaled density (D) so it never drops to zero
           "heatmap-color": ["interpolate", ["linear"], D,
             0.00, "rgba(0,0,0,0)",
-            0.02, "rgba(255,255,128,0.6)",
-            0.15, "rgba(255,200,64,0.85)",
-            0.40, "rgb(255,140,0)",
-            0.75, "rgb(255,64,0)",
-            1.20, "rgb(255,0,0)"
+            0.005, "rgba(255,255,128,0.55)",  /* ultra-low threshold to prevent vanish */
+            0.10,  "rgba(255,210,80,0.85)",
+            0.35,  "rgb(255,160,0)",
+            0.70,  "rgb(255,90,0)",
+            1.10,  "rgb(255,0,0)"
           ],
 
-          // valid transitions only
+          // valid transitions only (no color-transition on a ramp)
           "heatmap-opacity-transition":   { duration: 0, delay: 0 },
           "heatmap-radius-transition":    { duration: 0, delay: 0 },
           "heatmap-intensity-transition": { duration: 0, delay: 0 }
         },
-        filter: buildFilter(),
-        maxzoom: 22
+        filter: buildFilter()
       });
 
-      // --- Invisible points for hover/click (hit-testing only) ---
+      // Points layer for hover/click (completely invisible)
       map.addLayer({
         id: "points",
         type: "circle",
         source: "temps",
         "source-layer": LAYER_NAME,
-        minzoom: 8,
+        minzoom: 0,
+        maxzoom: 24,
         paint: {
           "circle-opacity": 0,
           "circle-stroke-opacity": 0
