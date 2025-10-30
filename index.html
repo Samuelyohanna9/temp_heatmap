@@ -68,7 +68,7 @@
   </script>
 
   <script>
-    // Config
+    // --- Config ---
     const PMTILES_BASEMAP = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
     const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
     const LAYER_NAME = "temps";
@@ -77,9 +77,13 @@
     const INIT_ZOOM = 12.2;
     const DECODE_ZOOM = 14;
     const CLICK_MAX_M = 60;
-    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
+    // Dataset bounds from your PMTiles metadata (minLon, minLat, maxLon, maxLat)
+    const DATA_BOUNDS = [10.785482, 45.145304, 10.814915, 45.167814];
 
-    // DOM
+    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
+    const currentTimeStr = () => `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
+
+    // --- DOM refs ---
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
@@ -87,9 +91,7 @@
     const chartContainer = document.getElementById("chartContainer");
     let chart = null;
 
-    const currentTimeStr = () => `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
-
-    // PMTiles protocol
+    // --- PMTiles protocol ---
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
     const archiveTemps = new pmtiles.PMTiles(PMTILES_TEMPS);
@@ -97,11 +99,19 @@
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
-    // Helpers for click/series
+    // --- Helpers for decoding / picking ---
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z));
       return { x, y };
+    }
+    function tileToLonLatBounds(x, y, z) {
+      const n = Math.pow(2, z);
+      const lon1 = x / n * 360 - 180;
+      const lat1 = (Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180) / Math.PI;
+      const lon2 = (x + 1) / n * 360 - 180;
+      const lat2 = (Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180) / Math.PI;
+      return [lon1, lat2, lon2, lat1]; // [minLon, minLat, maxLon, maxLat]
     }
     const wrap = (n, mod) => ((n % mod) + mod) % mod;
     function haversine(lon1, lat1, lon2, lat2) {
@@ -110,6 +120,8 @@
       const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
       return 2*R*Math.asin(Math.sqrt(a));
     }
+
+    // decode a single pmtiles tile to features
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
@@ -125,17 +137,39 @@
         return feats;
       } catch { return []; }
     }
-    async function decodeNeighborhood(lon, lat, z=DECODE_ZOOM) {
-      const { x, y } = lonlatToTile(lon, lat, z);
-      const max = Math.pow(2, z);
-      const coords = [];
-      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
-      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(z, tx, ty)));
+
+    // decode all tiles that cover DATA_BOUNDS at DECODE_ZOOM
+    async function decodeBoundsToPoints(bounds = DATA_BOUNDS, z = DECODE_ZOOM) {
+      const [minLon, minLat, maxLon, maxLat] = bounds;
+      const tl = lonlatToTile(minLon, maxLat, z);
+      const br = lonlatToTile(maxLon, minLat, z);
+      const n = Math.pow(2, z);
+      const xMin = Math.max(0, Math.min(tl.x, br.x));
+      const xMax = Math.min(n - 1, Math.max(tl.x, br.x));
+      const yMin = Math.max(0, Math.min(tl.y, br.y));
+      const yMax = Math.min(n - 1, Math.max(tl.y, br.y));
+
+      const promises = [];
+      for (let x = xMin; x <= xMax; x++) {
+        for (let y = yMin; y <= yMax; y++) {
+          promises.push(decodeTileToPoints(z, x, y));
+        }
+      }
+      const chunks = await Promise.all(promises);
       return chunks.flat();
     }
+
+    // pick nearby feature (for clicking)
     async function pickNearbyFeature(lon, lat, placeFilter) {
-      const all = await decodeNeighborhood(lon, lat, DECODE_ZOOM);
+      // For picking, a small 3x3 neighborhood is enough:
+      const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
+      const n = Math.pow(2, DECODE_ZOOM);
+      const coords = [];
+      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,n), wrap(y+dy,n)]);
+      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
+      const all = chunks.flat();
       const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
+
       let best = null, bestD = Infinity;
       for (const g of filtered) {
         const [gx, gy] = g.geometry.coordinates;
@@ -144,8 +178,15 @@
       }
       return (best && bestD <= CLICK_MAX_M) ? best : null;
     }
+
     async function loadSeriesByPixelId(pixelId, lonHint, latHint, placeFilter) {
-      const all = await decodeNeighborhood(lonHint, latHint, DECODE_ZOOM);
+      const { x, y } = lonlatToTile(lonHint, latHint, DECODE_ZOOM);
+      const n = Math.pow(2, DECODE_ZOOM);
+      const coords = [];
+      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,n), wrap(y+dy,n)]);
+      const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
+      const all = chunks.flat();
+
       const rows = all.filter(f =>
         String(f.properties?.pixel_id) === String(pixelId) &&
         (!placeFilter || f.properties?.place === placeFilter)
@@ -158,7 +199,7 @@
       return m;
     }
 
-    // Map style
+    // --- Map style ---
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -178,7 +219,7 @@
         : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
-    // Map
+    // --- Map init ---
     const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
@@ -190,47 +231,55 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // ---- Dynamic heatmap scaling (per hour + per place) using *rendered* features ----
-    function updateHeatmapScaleFromRendered() {
-      if (!map.getLayer("points")) return;
+    // --- GLOBAL per-hour/per-place min/max cache ---
+    // key = `${hour}|${placeValue}` where placeValue is actual place OR "__all__"
+    const globalMinMaxCache = new Map();
 
-      // Get currently rendered points (already filtered by hour/place via layer filter)
-      const feats = map.queryRenderedFeatures({ layers: ["points"] });
-      if (!feats || feats.length === 0) {
-        // Fallback: fixed weight mapping
-        map.setPaintProperty("heat", "heatmap-weight", [
-          "interpolate", ["linear"], ["get","value"],
-          24, 0,
-          36, 1
-        ]);
-        return;
+    async function getGlobalMinMaxFor(hourStr, placeValue) {
+      const key = `${hourStr}|${placeValue}`;
+      if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
+
+      // Decode all tiles covering dataset bounds once per (hour,place)
+      const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
+      const filtered = all.filter(f =>
+        f.properties?.time === hourStr &&
+        (placeValue === "__all__" || f.properties?.place === placeValue)
+      );
+      if (!filtered.length) {
+        const fallback = { min: 24, max: 36 };
+        globalMinMaxCache.set(key, fallback);
+        return fallback;
       }
-
-      // Compute min/max of values among rendered features
       let minVal = Infinity, maxVal = -Infinity;
-      for (const f of feats) {
+      for (const f of filtered) {
         const v = Number(f.properties?.value);
         if (Number.isFinite(v)) {
           if (v < minVal) minVal = v;
           if (v > maxVal) maxVal = v;
         }
       }
-      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) return;
-      if (minVal === maxVal) maxVal = minVal + 0.1; // avoid divide-by-zero effect
+      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
+        const fallback = { min: 24, max: 36 };
+        globalMinMaxCache.set(key, fallback);
+        return fallback;
+      }
+      if (minVal === maxVal) maxVal = minVal + 0.1; // avoid degenerate scale
+      const res = { min: minVal, max: maxVal };
+      globalMinMaxCache.set(key, res);
+      return res;
+    }
 
-      // Apply weight mapping for the *current view/hour/place*
+    async function applyGlobalHeatScale() {
+      if (!map.getLayer("heat")) return;
+      const hourStr = currentTimeStr();
+      const placeValue = $place.value; // "__all__" or specific place
+      const { min, max } = await getGlobalMinMaxFor(hourStr, placeValue);
       map.setPaintProperty("heat", "heatmap-weight", [
         "interpolate", ["linear"], ["get","value"],
-        minVal, 0,
-        maxVal, 1
+        min, 0,
+        max, 1
       ]);
     }
-
-    // Small debounce for view-change events
-    function debounce(fn, ms=120) {
-      let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-    }
-    const debouncedUpdateScale = debounce(updateHeatmapScaleFromRendered, 120);
 
     async function applyFilters() {
       const f = buildFilter();
@@ -238,10 +287,9 @@
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
 
-      // Recompute min/max from the *rendered* set after filters change
-      // Use a tiny timeout to allow render tree to update
-      setTimeout(updateHeatmapScaleFromRendered, 0);
+      await applyGlobalHeatScale(); // stable across zoom (per hour+place)
 
+      // keep chart hour marker in sync
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
@@ -258,13 +306,16 @@
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
-          // initial (will be overwritten dynamically)
+          // Initial (will be overwritten by applyGlobalHeatScale)
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
           "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6, 10,10, 12,18, 14,26, 16,30],
           "heatmap-intensity": 0.5,
           "heatmap-opacity": 0.9,
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
-            0.0, "rgba(0,255,0,0)", 0.3, "rgb(0,255,0)", 0.6, "rgb(255,255,0)", 1.0, "rgb(255,0,0)"]
+            0.0, "rgba(0,255,0,0)",
+            0.3, "rgb(0,255,0)",
+            0.6, "rgb(255,255,0)",
+            1.0, "rgb(255,0,0)"]
         },
         filter: buildFilter()
       });
@@ -279,18 +330,13 @@
         filter: buildFilter()
       });
 
-      // Update scaling when the view changes (pan/zoom/rotate)
-      map.on("moveend", debouncedUpdateScale);
-      map.on("zoomend", debouncedUpdateScale);
-      map.on("idle", debouncedUpdateScale);
-
       $hour.addEventListener("input", applyFilters);
       $place.addEventListener("change", applyFilters);
 
       applyFilters();
     });
 
-    // Hover popup (absolute values; coords shown)
+    // --- Popup (absolute values; coords) ---
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -307,7 +353,7 @@
         .addTo(map);
     });
 
-    // Click -> chart (pixel_id internal, coord label)
+    // --- Click -> chart (pixel_id internal, coord label) ---
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
       let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
