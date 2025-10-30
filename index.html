@@ -23,9 +23,9 @@
       font: 12px system-ui, sans-serif; box-shadow: 0 2px 12px rgba(0,0,0,.12);
     }
     #chartContainer {
-      position:absolute;top:10px;right:10px;width:360px;height:240px;
-      background:#fff;opacity:0.95;padding:10px;border-radius:8px;
-      display:none;z-index:20;
+      position:absolute; top:10px; right:10px; width:360px; height:240px;
+      background:#fff; opacity:0.95; padding:10px; border-radius:8px;
+      display:none; z-index:20;
     }
   </style>
 </head>
@@ -55,7 +55,6 @@
   <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
-  <!-- vendor scripts -->
   <script src="vendor/maplibre-gl.js"></script>
   <script src="vendor/pmtiles.js"></script>
   <script src="vendor/basemaps.js"></script>
@@ -69,21 +68,18 @@
   </script>
 
   <script>
-    // ---- Config ----
+    // Config
     const PMTILES_BASEMAP = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
     const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
-
-    const LAYER_NAME   = "temps";
-    const DATE         = "2025-07-23";
-    const INIT_CENTER  = [10.80, 45.16];
-    const INIT_ZOOM    = 12.2;
-    const DECODE_ZOOM  = 14;     // decode at max zoom for stable coords
-    const CLICK_MAX_M  = 60;     // ignore clicks further than this from any point
-
-    // Times in tiles: "YYYY-MM-DDTHH:00" (no seconds)
+    const LAYER_NAME = "temps";
+    const DATE = "2025-07-23";
+    const INIT_CENTER = [10.80, 45.16];
+    const INIT_ZOOM = 12.2;
+    const DECODE_ZOOM = 14;
+    const CLICK_MAX_M = 60;
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
-    // ---- UI refs ----
+    // DOM
     const $status = document.getElementById("status");
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
@@ -93,7 +89,7 @@
 
     const currentTimeStr = () => `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
 
-    // ---- PMTiles protocol ----
+    // PMTiles protocol
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
     const archiveTemps = new pmtiles.PMTiles(PMTILES_TEMPS);
@@ -101,7 +97,7 @@
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
-    // ---- Helpers ----
+    // Helpers
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor(
@@ -116,7 +112,6 @@
       const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
       return 2*R*Math.asin(Math.sqrt(a));
     }
-
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
@@ -132,7 +127,6 @@
         return feats;
       } catch { return []; }
     }
-
     async function decodeNeighborhood(lon, lat, z=DECODE_ZOOM) {
       const { x, y } = lonlatToTile(lon, lat, z);
       const max = Math.pow(2, z);
@@ -141,7 +135,6 @@
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(z, tx, ty)));
       return chunks.flat();
     }
-
     async function pickNearbyFeature(lon, lat, placeFilter) {
       const all = await decodeNeighborhood(lon, lat, DECODE_ZOOM);
       const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
@@ -151,11 +144,8 @@
         const d = haversine(lon, lat, gx, gy);
         if (d < bestD) { best = g; bestD = d; }
       }
-      if (best && bestD <= CLICK_MAX_M) return best;
-      return null;
+      return (best && bestD <= CLICK_MAX_M) ? best : null;
     }
-
-    // Use pixel_id internally for robust series assembly
     async function loadSeriesByPixelId(pixelId, lonHint, latHint, placeFilter) {
       const all = await decodeNeighborhood(lonHint, latHint, DECODE_ZOOM);
       const rows = all.filter(f =>
@@ -170,7 +160,7 @@
       return m;
     }
 
-    // ---- Style ----
+    // Style (sources + layers)
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -183,21 +173,15 @@
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        temps: {
-          type: "vector",
-          url: "pmtiles://" + PMTILES_TEMPS,
-          minzoom: 8
-        }
+        temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8 }
       },
       layers: (window.basemaps
         ? window.basemaps.layers(basemapSourceId, window.basemaps.namedFlavor("light"), { lang: "en" })
         : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
-    // ---- Map ----
-    const map = new maplibregl.Map({
-      container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22
-    });
+    // Map & filtering
+    const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
     map.on("error", (e) => console.error("Map error:", e?.error || e));
@@ -207,7 +191,6 @@
       const p = $place.value;
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
-
     function applyFilters() {
       const f = buildFilter();
       if (map.getLayer("heat"))   map.setFilter("heat", f);
@@ -223,31 +206,22 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // Heatmap
       map.addLayer({
         id: "heat",
         type: "heatmap",
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
-          // value 24°C -> weight 0 ; 36°C -> weight 1
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
-          // scale radius with zoom
           "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6, 10,10, 12,18, 14,26, 16,30],
           "heatmap-intensity": 0.5,
           "heatmap-opacity": 0.9,
-          // color ramp by density of weighted points
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
-            0.0, "rgba(0,255,0,0)",
-            0.3, "rgb(0,255,0)",
-            0.6, "rgb(255,255,0)",
-            1.0, "rgb(255,0,0)"
-          ]
+            0.0, "rgba(0,255,0,0)", 0.3, "rgb(0,255,0)", 0.6, "rgb(255,255,0)", 1.0, "rgb(255,0,0)"]
         },
         filter: buildFilter()
       });
 
-      // Invisible picking points
       map.addLayer({
         id: "points",
         type: "circle",
@@ -263,7 +237,7 @@
       applyFilters();
     });
 
-    // Hover popup — show COORDINATES (not pixel_id)
+    // Hover popup (coords shown)
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -280,10 +254,9 @@
         .addTo(map);
     });
 
-    // Click -> 24h series (use pixel_id internally, label with COORDS)
+    // Click -> chart (pixel_id internal, coord label)
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
-
       let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
                   .filter(f => !placeFilter || f.properties?.place === placeFilter)[0];
       if (!ft) ft = await pickNearbyFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
@@ -295,7 +268,6 @@
       const [lng, lat] = ft.geometry.coordinates;
       const byTime = await loadSeriesByPixelId(px, lng, lat, placeFilter);
       const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
-
       if (series.filter(v => v != null).length < 2) { chartContainer.style.display = "none"; return; }
 
       chartContainer.style.display = "block";
@@ -304,7 +276,6 @@
       chart = new Chart(ctx, {
         type: 'line',
         data: { labels: hours24, datasets: [{
-          // USER-FACING: coordinates
           label: `(${lng.toFixed(5)}, ${lat.toFixed(5)})${placeFilter ? " · "+placeFilter : ""}`,
           data: series, borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.3
         }]},
