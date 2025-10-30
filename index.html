@@ -80,7 +80,7 @@
     const DECODE_ZOOM  = 14;     // decode at max zoom for stable coords
     const CLICK_MAX_M  = 60;     // ignore clicks further than this from any point
 
-    // Your PMTiles times DO NOT include seconds: "2025-07-23T19:00"
+    // Times in tiles: "YYYY-MM-DDTHH:00" (no seconds)
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // ---- UI refs ----
@@ -155,6 +155,7 @@
       return null;
     }
 
+    // Use pixel_id internally for robust series assembly
     async function loadSeriesByPixelId(pixelId, lonHint, latHint, placeFilter) {
       const all = await decodeNeighborhood(lonHint, latHint, DECODE_ZOOM);
       const rows = all.filter(f =>
@@ -222,16 +223,20 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
+      // Heatmap
       map.addLayer({
         id: "heat",
         type: "heatmap",
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
-          "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0,36,1],
-          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6,10,10,12,18,14,26,16,30],
+          // value 24°C -> weight 0 ; 36°C -> weight 1
+          "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
+          // scale radius with zoom
+          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6, 10,10, 12,18, 14,26, 16,30],
           "heatmap-intensity": 0.5,
           "heatmap-opacity": 0.9,
+          // color ramp by density of weighted points
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
             0.0, "rgba(0,255,0,0)",
             0.3, "rgb(0,255,0)",
@@ -242,6 +247,7 @@
         filter: buildFilter()
       });
 
+      // Invisible picking points
       map.addLayer({
         id: "points",
         type: "circle",
@@ -257,19 +263,24 @@
       applyFilters();
     });
 
-    // Hover popup
+    // Hover popup — show COORDINATES (not pixel_id)
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
-      const { pixel_id, value, time, place } = f.properties;
+      const { value, time, place } = f.properties;
+      const [lng, lat] = f.geometry.coordinates;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}${place ? "<br>"+place : ""}${pixel_id ? "<br>ID: "+pixel_id : ""}`)
+        .setHTML(`
+          <strong>${Number(value).toFixed(1)}°C</strong>
+          <br>${time}${place ? "<br>"+place : ""}
+          <br>(${lng.toFixed(5)}, ${lat.toFixed(5)})
+        `)
         .addTo(map);
     });
 
-    // Click -> 24h series by pixel_id
+    // Click -> 24h series (use pixel_id internally, label with COORDS)
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
 
@@ -293,7 +304,8 @@
       chart = new Chart(ctx, {
         type: 'line',
         data: { labels: hours24, datasets: [{
-          label: `Pixel ${px}${placeFilter ? " · "+placeFilter : ""}`,
+          // USER-FACING: coordinates
+          label: `(${lng.toFixed(5)}, ${lat.toFixed(5)})${placeFilter ? " · "+placeFilter : ""}`,
           data: series, borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.3
         }]},
         options: {
