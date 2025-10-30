@@ -77,7 +77,7 @@
     const INIT_ZOOM = 12.2;
     const DECODE_ZOOM = 14;
     const CLICK_MAX_M = 60;
-    // Dataset bounds from your PMTiles metadata (minLon, minLat, maxLon, maxLat)
+    // Dataset bounds from your PMTiles metadata
     const DATA_BOUNDS = [10.785482, 45.145304, 10.814915, 45.167814];
 
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
@@ -99,19 +99,11 @@
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
-    // --- Helpers for decoding / picking ---
+    // --- Helpers ---
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z));
       return { x, y };
-    }
-    function tileToLonLatBounds(x, y, z) {
-      const n = Math.pow(2, z);
-      const lon1 = x / n * 360 - 180;
-      const lat1 = (Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180) / Math.PI;
-      const lon2 = (x + 1) / n * 360 - 180;
-      const lat2 = (Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180) / Math.PI;
-      return [lon1, lat2, lon2, lat1]; // [minLon, minLat, maxLon, maxLat]
     }
     const wrap = (n, mod) => ((n % mod) + mod) % mod;
     function haversine(lon1, lat1, lon2, lat2) {
@@ -121,7 +113,6 @@
       return 2*R*Math.asin(Math.sqrt(a));
     }
 
-    // decode a single pmtiles tile to features
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
@@ -138,7 +129,6 @@
       } catch { return []; }
     }
 
-    // decode all tiles that cover DATA_BOUNDS at DECODE_ZOOM
     async function decodeBoundsToPoints(bounds = DATA_BOUNDS, z = DECODE_ZOOM) {
       const [minLon, minLat, maxLon, maxLat] = bounds;
       const tl = lonlatToTile(minLon, maxLat, z);
@@ -148,7 +138,6 @@
       const xMax = Math.min(n - 1, Math.max(tl.x, br.x));
       const yMin = Math.max(0, Math.min(tl.y, br.y));
       const yMax = Math.min(n - 1, Math.max(tl.y, br.y));
-
       const promises = [];
       for (let x = xMin; x <= xMax; x++) {
         for (let y = yMin; y <= yMax; y++) {
@@ -159,9 +148,7 @@
       return chunks.flat();
     }
 
-    // pick nearby feature (for clicking)
     async function pickNearbyFeature(lon, lat, placeFilter) {
-      // For picking, a small 3x3 neighborhood is enough:
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const n = Math.pow(2, DECODE_ZOOM);
       const coords = [];
@@ -169,7 +156,6 @@
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
       const all = chunks.flat();
       const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
-
       let best = null, bestD = Infinity;
       for (const g of filtered) {
         const [gx, gy] = g.geometry.coordinates;
@@ -186,7 +172,6 @@
       for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,n), wrap(y+dy,n)]);
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
       const all = chunks.flat();
-
       const rows = all.filter(f =>
         String(f.properties?.pixel_id) === String(pixelId) &&
         (!placeFilter || f.properties?.place === placeFilter)
@@ -219,37 +204,24 @@
         : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
-    // --- Map init ---
-    const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
-    map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
-    map.on("error", (e) => console.error("Map error:", e?.error || e));
-
-    function buildFilter() {
-      const timeFilter = ["==", ["get","time"], currentTimeStr()];
-      const p = $place.value;
-      return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
-    }
-
-    // --- GLOBAL per-hour/per-place min/max cache ---
-    // key = `${hour}|${placeValue}` where placeValue is actual place OR "__all__"
+    // --- Per-hour & per-place global min/max cache ---
     const globalMinMaxCache = new Map();
-
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
       if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
 
-      // Decode all tiles covering dataset bounds once per (hour,place)
       const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
       const filtered = all.filter(f =>
         f.properties?.time === hourStr &&
         (placeValue === "__all__" || f.properties?.place === placeValue)
       );
+
       if (!filtered.length) {
         const fallback = { min: 24, max: 36 };
         globalMinMaxCache.set(key, fallback);
         return fallback;
       }
+
       let minVal = Infinity, maxVal = -Infinity;
       for (const f of filtered) {
         const v = Number(f.properties?.value);
@@ -264,6 +236,7 @@
         return fallback;
       }
       if (minVal === maxVal) maxVal = minVal + 0.1; // avoid degenerate scale
+
       const res = { min: minVal, max: maxVal };
       globalMinMaxCache.set(key, res);
       return res;
@@ -281,21 +254,34 @@
       ]);
     }
 
+    function buildFilter() {
+      const timeFilter = ["==", ["get","time"], currentTimeStr()];
+      const p = $place.value;
+      return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
+    }
+
     async function applyFilters() {
       const f = buildFilter();
       if (map.getLayer("heat"))   map.setFilter("heat", f);
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
 
-      await applyGlobalHeatScale(); // stable across zoom (per hour+place)
+      // Recompute per-hour/per-place min/max and apply weight scaling
+      await applyGlobalHeatScale();
 
-      // keep chart hour marker in sync
+      // Keep chart hour marker in sync
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
         chart.update('none');
       }
     }
+
+    // --- Map init ---
+    const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+    map.on("error", (e) => console.error("Map error:", e?.error || e));
 
     map.on("load", () => {
       $status.textContent = "ready";
@@ -306,10 +292,11 @@
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
-          // Initial (will be overwritten by applyGlobalHeatScale)
+          // Initial baseline; gets overwritten by applyGlobalHeatScale()
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
-          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6, 10,10, 12,18, 14,26, 16,30],
-          "heatmap-intensity": 0.5,
+          // Softer zoom curve so color doesn’t vanish at high zoom
+          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,10, 12,18, 14,24, 16,28],
+          "heatmap-intensity": 0.6,
           "heatmap-opacity": 0.9,
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
             0.0, "rgba(0,255,0,0)",
@@ -336,7 +323,7 @@
       applyFilters();
     });
 
-    // --- Popup (absolute values; coords) ---
+    // --- Popup (absolute °C; coords) ---
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
