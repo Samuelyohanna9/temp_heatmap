@@ -160,7 +160,7 @@
       return m;
     }
 
-    // Style (sources + layers)
+    // Map style
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -180,7 +180,7 @@
         : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
-    // Map & filtering
+    // Map
     const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
@@ -191,11 +191,32 @@
       const p = $place.value;
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
-    function applyFilters() {
+
+    // Dynamic heatmap scaling per hour
+    async function updateHeatmapScale() {
+      const all = await decodeNeighborhood(INIT_CENTER[0], INIT_CENTER[1], DECODE_ZOOM);
+      const filtered = all.filter(f =>
+        f.properties?.time === currentTimeStr() &&
+        ($place.value === "__all__" || f.properties?.place === $place.value)
+      );
+      if (!filtered.length) return;
+      const values = filtered.map(f => Number(f.properties.value));
+      let minVal = Math.min(...values);
+      let maxVal = Math.max(...values);
+      if (minVal === maxVal) maxVal = minVal + 0.1;
+      map.setPaintProperty("heat", "heatmap-weight", [
+        "interpolate", ["linear"], ["get","value"],
+        minVal, 0,
+        maxVal, 1
+      ]);
+    }
+
+    async function applyFilters() {
       const f = buildFilter();
       if (map.getLayer("heat"))   map.setFilter("heat", f);
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
+      await updateHeatmapScale();
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
@@ -237,7 +258,7 @@
       applyFilters();
     });
 
-    // Hover popup (coords shown)
+    // Hover popup
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -254,7 +275,7 @@
         .addTo(map);
     });
 
-    // Click -> chart (pixel_id internal, coord label)
+    // Click -> chart
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
       let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
