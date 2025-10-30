@@ -198,6 +198,7 @@
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
+        // Allow overzooming but we’ll compensate visually
         temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8, maxzoom: 22 }
       },
       layers: (window.basemaps
@@ -292,7 +293,21 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // --- Heat layer (robust visibility; no bad transition key) ---
+      // Expression helpers inline:
+      // ZGAIN = zoom-based gain to counter density collapse at high zoom.
+      const ZGAIN = ["interpolate", ["exponential", 2], ["zoom"],
+        8, 1,
+        12, 2,
+        14, 4,
+        16, 8,
+        18, 16,
+        20, 24,
+        22, 32
+      ];
+      // D = scaled density
+      const D = ["*", ["heatmap-density"], ZGAIN];
+
+      // --- Heat layer (zoom-compensated density) ---
       map.addLayer({
         id: "heat",
         type: "heatmap",
@@ -302,42 +317,46 @@
           // baseline; applyGlobalHeatScale() overwrites per hour/place
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
 
-          // Kernel size with zoom (tuned to keep cohesion w/o over-smoothing)
+          // moderate kernel growth; avoid over-smoothing
           "heatmap-radius": ["interpolate", ["exponential", 1.6], ["zoom"],
-            8, 20,
-            12, 48,
-            14, 72,
-            16, 120,
-            18, 180
+            8, 18,
+            12, 42,
+            14, 64,
+            16, 96,
+            18, 128,
+            20, 160
           ],
 
-          // Modest intensity growth with zoom
-          "heatmap-intensity": ["interpolate", ["exponential", 1.2], ["zoom"],
-            8, 1.1,
-            12, 1.8,
-            14, 2.6,
-            16, 3.5,
-            18, 4.2
+          // stronger intensity with zoom to keep colors vivid
+          "heatmap-intensity": ["interpolate", ["exponential", 2], ["zoom"],
+            8, 1.2,
+            12, 2.2,
+            14, 3.8,
+            16, 6.5,
+            18, 10,
+            20, 14
           ],
 
-          // Keep fully opaque
+          // keep fully opaque
           "heatmap-opacity": 1,
 
-          // Lower visibility threshold so low densities still render
-          "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
+          // Use D (zoom-scaled density) so the ramp doesn't vanish at high zoom.
+          "heatmap-color": ["interpolate", ["linear"], D,
             0.00, "rgba(0,0,0,0)",
-            0.12, "rgba(255,255,128,0.75)",
-            0.35, "rgb(255,180,0)",
-            0.65, "rgb(255,96,0)",
-            1.00, "rgb(255,0,0)"
+            0.02, "rgba(255,255,128,0.6)",
+            0.15, "rgba(255,200,64,0.85)",
+            0.40, "rgb(255,140,0)",
+            0.75, "rgb(255,64,0)",
+            1.20, "rgb(255,0,0)"
           ],
 
-          // Valid transitions only
+          // valid transitions only
           "heatmap-opacity-transition":   { duration: 0, delay: 0 },
           "heatmap-radius-transition":    { duration: 0, delay: 0 },
           "heatmap-intensity-transition": { duration: 0, delay: 0 }
         },
-        filter: buildFilter()
+        filter: buildFilter(),
+        maxzoom: 22
       });
 
       // --- Invisible points for hover/click (hit-testing only) ---
