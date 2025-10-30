@@ -97,12 +97,10 @@
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
-    // Helpers
+    // Helpers for click/series
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
-      const y = Math.floor(
-        (1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z)
-      );
+      const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z));
       return { x, y };
     }
     const wrap = (n, mod) => ((n % mod) + mod) % mod;
@@ -192,18 +190,35 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // Dynamic heatmap scaling per hour
-    async function updateHeatmapScale() {
-      const all = await decodeNeighborhood(INIT_CENTER[0], INIT_CENTER[1], DECODE_ZOOM);
-      const filtered = all.filter(f =>
-        f.properties?.time === currentTimeStr() &&
-        ($place.value === "__all__" || f.properties?.place === $place.value)
-      );
-      if (!filtered.length) return;
-      const values = filtered.map(f => Number(f.properties.value));
-      let minVal = Math.min(...values);
-      let maxVal = Math.max(...values);
-      if (minVal === maxVal) maxVal = minVal + 0.1;
+    // ---- Dynamic heatmap scaling (per hour + per place) using *rendered* features ----
+    function updateHeatmapScaleFromRendered() {
+      if (!map.getLayer("points")) return;
+
+      // Get currently rendered points (already filtered by hour/place via layer filter)
+      const feats = map.queryRenderedFeatures({ layers: ["points"] });
+      if (!feats || feats.length === 0) {
+        // Fallback: fixed weight mapping
+        map.setPaintProperty("heat", "heatmap-weight", [
+          "interpolate", ["linear"], ["get","value"],
+          24, 0,
+          36, 1
+        ]);
+        return;
+      }
+
+      // Compute min/max of values among rendered features
+      let minVal = Infinity, maxVal = -Infinity;
+      for (const f of feats) {
+        const v = Number(f.properties?.value);
+        if (Number.isFinite(v)) {
+          if (v < minVal) minVal = v;
+          if (v > maxVal) maxVal = v;
+        }
+      }
+      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) return;
+      if (minVal === maxVal) maxVal = minVal + 0.1; // avoid divide-by-zero effect
+
+      // Apply weight mapping for the *current view/hour/place*
       map.setPaintProperty("heat", "heatmap-weight", [
         "interpolate", ["linear"], ["get","value"],
         minVal, 0,
@@ -211,12 +226,22 @@
       ]);
     }
 
+    // Small debounce for view-change events
+    function debounce(fn, ms=120) {
+      let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+    const debouncedUpdateScale = debounce(updateHeatmapScaleFromRendered, 120);
+
     async function applyFilters() {
       const f = buildFilter();
       if (map.getLayer("heat"))   map.setFilter("heat", f);
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
-      await updateHeatmapScale();
+
+      // Recompute min/max from the *rendered* set after filters change
+      // Use a tiny timeout to allow render tree to update
+      setTimeout(updateHeatmapScaleFromRendered, 0);
+
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
@@ -233,6 +258,7 @@
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
+          // initial (will be overwritten dynamically)
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
           "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 8,6, 10,10, 12,18, 14,26, 16,30],
           "heatmap-intensity": 0.5,
@@ -253,12 +279,18 @@
         filter: buildFilter()
       });
 
+      // Update scaling when the view changes (pan/zoom/rotate)
+      map.on("moveend", debouncedUpdateScale);
+      map.on("zoomend", debouncedUpdateScale);
+      map.on("idle", debouncedUpdateScale);
+
       $hour.addEventListener("input", applyFilters);
       $place.addEventListener("change", applyFilters);
+
       applyFilters();
     });
 
-    // Hover popup
+    // Hover popup (absolute values; coords shown)
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -275,7 +307,7 @@
         .addTo(map);
     });
 
-    // Click -> chart
+    // Click -> chart (pixel_id internal, coord label)
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
       let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
