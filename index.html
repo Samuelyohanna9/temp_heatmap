@@ -187,6 +187,7 @@
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
+      // Disable global transitions to avoid zoom “fade”
       transition: { duration: 0, delay: 0 },
       glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
       sprite: "https://protomaps.github.io/basemaps-assets/sprites/v4/light",
@@ -197,7 +198,6 @@
           minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
-        // add maxzoom so we can render/query at high zooms comfortably
         temps: { type: "vector", url: "pmtiles://" + PMTILES_TEMPS, minzoom: 8, maxzoom: 22 }
       },
       layers: (window.basemaps
@@ -236,7 +236,7 @@
         globalMinMaxCache.set(key, fallback);
         return fallback;
       }
-      if (minVal === maxVal) maxVal = minVal + 0.1;
+      if (minVal === maxVal) maxVal = minVal + 0.1; // avoid degenerate scale
 
       const res = { min: minVal, max: maxVal };
       globalMinMaxCache.set(key, res);
@@ -246,7 +246,7 @@
     async function applyGlobalHeatScale() {
       if (!map.getLayer("heat")) return;
       const hourStr = currentTimeStr();
-      const placeValue = $place.value;
+      const placeValue = $place.value; // "__all__" or a place
       const { min, max } = await getGlobalMinMaxFor(hourStr, placeValue);
       map.setPaintProperty("heat", "heatmap-weight", [
         "interpolate", ["linear"], ["get","value"],
@@ -276,7 +276,7 @@
       }
     }
 
-    // --- Map init ---
+    // --- Map init (fadeDuration=0 removes tile cross-fade) ---
     const map = new maplibregl.Map({
       container: "map",
       style,
@@ -292,16 +292,17 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // --- Heat layer (robust visibility) ---
+      // --- Heat layer (robust visibility; no bad transition key) ---
       map.addLayer({
         id: "heat",
         type: "heatmap",
         source: "temps",
         "source-layer": LAYER_NAME,
         paint: {
+          // baseline; applyGlobalHeatScale() overwrites per hour/place
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
 
-          // moderate kernel growth with zoom (keeps shape, avoids over-smoothing)
+          // Kernel size with zoom (tuned to keep cohesion w/o over-smoothing)
           "heatmap-radius": ["interpolate", ["exponential", 1.6], ["zoom"],
             8, 20,
             12, 48,
@@ -310,7 +311,7 @@
             18, 180
           ],
 
-          // boost slightly with zoom; not so strong that peaks flatten
+          // Modest intensity growth with zoom
           "heatmap-intensity": ["interpolate", ["exponential", 1.2], ["zoom"],
             8, 1.1,
             12, 1.8,
@@ -319,9 +320,10 @@
             18, 4.2
           ],
 
+          // Keep fully opaque
           "heatmap-opacity": 1,
 
-          // lower the invisible threshold so low densities still appear
+          // Lower visibility threshold so low densities still render
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,0,0,0)",
             0.12, "rgba(255,255,128,0.75)",
@@ -330,9 +332,8 @@
             1.00, "rgb(255,0,0)"
           ],
 
-          // no animated paint transitions
+          // Valid transitions only
           "heatmap-opacity-transition":   { duration: 0, delay: 0 },
-          "heatmap-color-transition":     { duration: 0, delay: 0 },
           "heatmap-radius-transition":    { duration: 0, delay: 0 },
           "heatmap-intensity-transition": { duration: 0, delay: 0 }
         },
