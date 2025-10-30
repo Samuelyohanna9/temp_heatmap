@@ -4,10 +4,7 @@
   <meta charset="utf-8" />
   <title>City Temperature Heatmap</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- LOCAL vendor CSS -->
   <link href="vendor/maplibre-gl.css" rel="stylesheet" />
-
   <style>
     html, body { margin: 0; height: 100%; }
     #map { position: absolute; inset: 0; }
@@ -58,7 +55,7 @@
   <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
-  <!-- LOCAL vendor JS (UMD builds) -->
+  <!-- vendor scripts -->
   <script src="vendor/maplibre-gl.js"></script>
   <script src="vendor/pmtiles.js"></script>
   <script src="vendor/basemaps.js"></script>
@@ -67,12 +64,8 @@
   <script src="vendor/chart.umd.js"></script>
   <script src="vendor/chartjs-plugin-annotation.min.js"></script>
   <script>
-    // Register Chart.js annotation plugin (UMD)
-    if (window['chartjs-plugin-annotation']) {
-      Chart.register(window['chartjs-plugin-annotation']);
-    } else if (window.ChartAnnotation) {
-      Chart.register(window.ChartAnnotation);
-    }
+    if (window['chartjs-plugin-annotation']) Chart.register(window['chartjs-plugin-annotation']);
+    else if (window.ChartAnnotation) Chart.register(window.ChartAnnotation);
   </script>
 
   <script>
@@ -80,17 +73,15 @@
     const PMTILES_BASEMAP = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/mantua_basemap.pmtiles";
     const PMTILES_TEMPS   = "https://pub-7d28cd0e85994386bd14b8b8fa86a6d7.r2.dev/all_temps.pmtiles";
 
-    const LAYER_NAME = "temps";
-    const DATE = "2025-07-23";
-    const INIT_CENTER = [10.80, 45.16];
-    const INIT_ZOOM = 12.2;
+    const LAYER_NAME   = "temps";
+    const DATE         = "2025-07-23";
+    const INIT_CENTER  = [10.80, 45.16];
+    const INIT_ZOOM    = 12.2;
+    const DECODE_ZOOM  = 14;     // decode at max zoom for stable coords
+    const CLICK_MAX_M  = 60;     // ignore clicks further than this from any point
 
-    // decode tiles at a fixed zoom so vector quantization is consistent
-    const DECODE_ZOOM = 14;
-    const EPS = 1e-6; // coordinate tolerance when grouping by lon/lat
-
-    // Your PMTiles times use seconds (e.g. ...T07:00:00) – keep that
-    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00:00`);
+    // Your PMTiles times DO NOT include seconds: "2025-07-23T19:00"
+    const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
 
     // ---- UI refs ----
     const $status = document.getElementById("status");
@@ -100,9 +91,7 @@
     const chartContainer = document.getElementById("chartContainer");
     let chart = null;
 
-    function currentTimeStr() {
-      return `${DATE}T${String($hour.value).padStart(2,"0")}:00:00`;
-    }
+    const currentTimeStr = () => `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
 
     // ---- PMTiles protocol ----
     const protocol = new pmtiles.Protocol();
@@ -120,9 +109,14 @@
       );
       return { x, y };
     }
-    function wrap(n, mod) { return ((n % mod) + mod) % mod; }
+    const wrap = (n, mod) => ((n % mod) + mod) % mod;
+    function haversine(lon1, lat1, lon2, lat2) {
+      const R = 6371000, toRad = d => d*Math.PI/180;
+      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(a));
+    }
 
-    // Decode one z/x/y tile to GeoJSON Points
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
@@ -136,53 +130,46 @@
           if (f.geometry?.type === "Point") feats.push(f);
         }
         return feats;
-      } catch (err) {
-        console.warn("decodeTileToPoints failed:", err);
-        return [];
-      }
+      } catch { return []; }
     }
 
-    // Decode a 3x3 neighborhood around lon/lat (robust near tile edges)
     async function decodeNeighborhood(lon, lat, z=DECODE_ZOOM) {
       const { x, y } = lonlatToTile(lon, lat, z);
       const max = Math.pow(2, z);
       const coords = [];
-      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++)
-        coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
+      for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,max), wrap(y+dy,max)]);
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(z, tx, ty)));
       return chunks.flat();
     }
 
-    // Nearest feature by planar distance (good at this scale)
-    async function findNearestFeature(lon, lat, placeFilter) {
+    async function pickNearbyFeature(lon, lat, placeFilter) {
       const all = await decodeNeighborhood(lon, lat, DECODE_ZOOM);
       const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
-      let best = null, bestD2 = Infinity;
+      let best = null, bestD = Infinity;
       for (const g of filtered) {
         const [gx, gy] = g.geometry.coordinates;
-        const dx = (gx - lon), dy = (gy - lat);
-        const d2 = dx*dx + dy*dy;
-        if (d2 < bestD2) { best = g; bestD2 = d2; }
+        const d = haversine(lon, lat, gx, gy);
+        if (d < bestD) { best = g; bestD = d; }
       }
-      return best;
+      if (best && bestD <= CLICK_MAX_M) return best;
+      return null;
     }
 
-    // >>> Core change: build 24h series by COORDINATE (not id) <<<
-    async function loadTimeseriesAtCoord(lon, lat, placeFilter) {
-      const all = await decodeNeighborhood(lon, lat, DECODE_ZOOM);
-      const byTime = new Map();
-      for (const f of all) {
+    async function loadSeriesByPixelId(pixelId, lonHint, latHint, placeFilter) {
+      const all = await decodeNeighborhood(lonHint, latHint, DECODE_ZOOM);
+      const rows = all.filter(f =>
+        String(f.properties?.pixel_id) === String(pixelId) &&
+        (!placeFilter || f.properties?.place === placeFilter)
+      );
+      const m = new Map();
+      for (const f of rows) {
         const p = f.properties || {};
-        if (placeFilter && p.place !== placeFilter) continue;
-        const [fx, fy] = f.geometry.coordinates;
-        if (Math.abs(fx - lon) < EPS && Math.abs(fy - lat) < EPS && p.time && typeof p.value !== "undefined") {
-          byTime.set(p.time, Number(p.value));
-        }
+        if (p.time && typeof p.value !== "undefined") m.set(p.time, Number(p.value));
       }
-      return byTime;
+      return m;
     }
 
-    // ---- Style (Protomaps basemap) ----
+    // ---- Style ----
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -192,8 +179,7 @@
         [basemapSourceId]: {
           type: "vector",
           url: "pmtiles://" + PMTILES_BASEMAP,
-          minzoom: 0,
-          maxzoom: 14,
+          minzoom: 0, maxzoom: 14,
           attribution: '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>'
         },
         temps: {
@@ -209,13 +195,8 @@
 
     // ---- Map ----
     const map = new maplibregl.Map({
-      container: "map",
-      style,
-      center: INIT_CENTER,
-      zoom: INIT_ZOOM,
-      maxZoom: 22
+      container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22
     });
-
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
     map.on("error", (e) => console.error("Map error:", e?.error || e));
@@ -231,7 +212,6 @@
       if (map.getLayer("heat"))   map.setFilter("heat", f);
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
-
       if (chart && chart.options?.plugins?.annotation?.annotations?.selectedHour) {
         chart.options.plugins.annotation.annotations.selectedHour.value = currentTimeStr();
         chart.options.plugins.annotation.annotations.selectedHour.label.content = `Hour ${$hour.value}:00`;
@@ -242,7 +222,6 @@
     map.on("load", () => {
       $status.textContent = "ready";
 
-      // Heatmap layer
       map.addLayer({
         id: "heat",
         type: "heatmap",
@@ -263,17 +242,13 @@
         filter: buildFilter()
       });
 
-      // Invisible picking points layer
       map.addLayer({
         id: "points",
         type: "circle",
         source: "temps",
         "source-layer": LAYER_NAME,
         minzoom: 8,
-        paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 8,8,12,5,16,3],
-          "circle-color": "rgba(0,0,0,0)"
-        },
+        paint: { "circle-radius": 5, "circle-color": "rgba(0,0,0,0)" },
         filter: buildFilter()
       });
 
@@ -283,92 +258,55 @@
     });
 
     // Hover popup
-    let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
       if (!features.length) { popup.remove(); return; }
       const f = features[0];
-      const { value, time, place, id } = f.properties;
+      const { pixel_id, value, time, place } = f.properties;
       popup.setLngLat(e.lngLat)
-        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}${place ? "<br>"+place : ""}${typeof id!=="undefined" ? "<br>ID: "+id : ""}`)
+        .setHTML(`<strong>${Number(value).toFixed(1)}°C</strong><br>${time}${place ? "<br>"+place : ""}${pixel_id ? "<br>ID: "+pixel_id : ""}`)
         .addTo(map);
     });
 
-    // Click -> 24h series by COORDINATE
+    // Click -> 24h series by pixel_id
     map.on("click", async (e) => {
-      try {
-        const placeFilter = $place.value === "__all__" ? null : $place.value;
+      const placeFilter = $place.value === "__all__" ? null : $place.value;
 
-        // Use rendered point if available; else find nearest decoded feature
-        let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
-                    .filter(f => !placeFilter || f.properties?.place === placeFilter)[0];
+      let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
+                  .filter(f => !placeFilter || f.properties?.place === placeFilter)[0];
+      if (!ft) ft = await pickNearbyFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
+      if (!ft) { chartContainer.style.display = "none"; return; }
 
-        let seedCoord, seedPlace;
-        if (ft) {
-          seedCoord = ft.geometry.coordinates;
-          seedPlace = ft.properties?.place ?? null;
-        } else {
-          const nearest = await findNearestFeature(e.lngLat.lng, e.lngLat.lat, placeFilter);
-          if (!nearest) { chartContainer.style.display = "none"; return; }
-          seedCoord = nearest.geometry.coordinates;
-          seedPlace = nearest.properties?.place ?? null;
+      const px = ft.properties?.pixel_id;
+      if (!px) { chartContainer.style.display = "none"; return; }
+
+      const [lng, lat] = ft.geometry.coordinates;
+      const byTime = await loadSeriesByPixelId(px, lng, lat, placeFilter);
+      const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
+
+      if (series.filter(v => v != null).length < 2) { chartContainer.style.display = "none"; return; }
+
+      chartContainer.style.display = "block";
+      const ctx = document.getElementById("tempChart").getContext("2d");
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: hours24, datasets: [{
+          label: `Pixel ${px}${placeFilter ? " · "+placeFilter : ""}`,
+          data: series, borderWidth: 2, pointRadius: 3, spanGaps: true, tension: 0.3
+        }]},
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: { x: { ticks: { autoSkip:true, maxTicksLimit:12 } } },
+          plugins: { legend: { display:true }, annotation: {
+            annotations: { selectedHour: {
+              type:'line', scaleID:'x', value: currentTimeStr(),
+              borderWidth:2, label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
+            }}
+          }}
         }
-
-        const [lng, lat] = seedCoord;
-        const effectivePlace = placeFilter || seedPlace || null;
-
-        // Build timeseries at that exact coordinate (with EPS)
-        const byTime = await loadTimeseriesAtCoord(lng, lat, effectivePlace);
-        const series = hours24.map(t => byTime.has(t) ? byTime.get(t) : null);
-
-        chartContainer.style.display = "block";
-        const ctx = document.getElementById("tempChart").getContext("2d");
-        if (chart) chart.destroy();
-
-        chart = new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels: hours24,
-            datasets: [{
-              label: `Temp at [${lng.toFixed(5)}, ${lat.toFixed(5)}]${effectivePlace ? " · "+effectivePlace : ""}`,
-              data: series,
-              borderWidth: 2,
-              pointRadius: 3,
-              spanGaps: true,
-              tension: 0.3
-            }]
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: { x: { ticks: { autoSkip:true, maxTicksLimit:12 } } },
-            plugins: {
-              legend: { display:true },
-              annotation: {
-                annotations: {
-                  selectedHour: {
-                    type:'line',
-                    scaleID:'x',
-                    value: currentTimeStr(),
-                    borderWidth:2,
-                    label:{ content: `Hour ${$hour.value}:00`, enabled:true, position:'start' }
-                  }
-                }
-              }
-            }
-          }
-        });
-      } catch (err) {
-        console.error("Click/coord-series error:", err);
-        chartContainer.style.display = "none";
-      }
-    });
-
-    // Extra: surface any resource 404s clearly
-    window.addEventListener("error", (e) => {
-      if (e?.message && String(e.message).includes("404")) {
-        console.error("A required file returned 404:", e);
-      }
+      });
     });
   </script>
 </body>
