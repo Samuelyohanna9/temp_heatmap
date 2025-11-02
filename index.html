@@ -106,7 +106,7 @@
     </div>
 
     <div class="small" style="margin-top:6px;">
-    
+      Tip: increase the z16 radius if high-zoom still looks sparse.
     </div>
   </div>
 
@@ -135,7 +135,6 @@
     const INIT_ZOOM = 12.2;
     const DECODE_ZOOM = 14;
     const CLICK_MAX_M = 60;
-    // Dataset bounds from PMTiles metadata (minLon, minLat, maxLon, maxLat)
     const DATA_BOUNDS = [10.785482, 45.145304, 10.814915, 45.167814];
 
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
@@ -169,7 +168,7 @@
     protocol.add(archiveTemps);
     protocol.add(archiveBase);
 
-    // --- Helpers for decoding / picking ---
+    // --- Helpers ---
     function lonlatToTile(lon, lat, z) {
       const x = Math.floor(((lon + 180) / 360) * Math.pow(2, z));
       const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * Math.pow(2, z));
@@ -182,7 +181,6 @@
       const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
       return 2*R*Math.asin(Math.sqrt(a));
     }
-
     async function decodeTileToPoints(z, x, y) {
       try {
         const resp = await archiveTemps.getZxy(z, x, y);
@@ -198,7 +196,6 @@
         return feats;
       } catch { return []; }
     }
-
     async function decodeBoundsToPoints(bounds = DATA_BOUNDS, z = DECODE_ZOOM) {
       const [minLon, minLat, maxLon, maxLat] = bounds;
       const tl = lonlatToTile(minLon, maxLat, z);
@@ -208,17 +205,13 @@
       const xMax = Math.min(n - 1, Math.max(tl.x, br.x));
       const yMin = Math.max(0, Math.min(tl.y, br.y));
       const yMax = Math.min(n - 1, Math.max(tl.y, br.y));
-
       const promises = [];
       for (let x = xMin; x <= xMax; x++) {
-        for (let y = yMin; y <= yMax; y++) {
-          promises.push(decodeTileToPoints(z, x, y));
-        }
+        for (let y = yMin; y <= yMax; y++) promises.push(decodeTileToPoints(z, x, y));
       }
       const chunks = await Promise.all(promises);
       return chunks.flat();
     }
-
     async function pickNearbyFeature(lon, lat, placeFilter) {
       const { x, y } = lonlatToTile(lon, lat, DECODE_ZOOM);
       const n = Math.pow(2, DECODE_ZOOM);
@@ -227,7 +220,6 @@
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
       const all = chunks.flat();
       const filtered = placeFilter ? all.filter(g => g.properties?.place === placeFilter) : all;
-
       let best = null, bestD = Infinity;
       for (const g of filtered) {
         const [gx, gy] = g.geometry.coordinates;
@@ -236,7 +228,6 @@
       }
       return (best && bestD <= CLICK_MAX_M) ? best : null;
     }
-
     async function loadSeriesByPixelId(pixelId, lonHint, latHint, placeFilter) {
       const { x, y } = lonlatToTile(lonHint, latHint, DECODE_ZOOM);
       const n = Math.pow(2, DECODE_ZOOM);
@@ -244,7 +235,6 @@
       for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) coords.push([wrap(x+dx,n), wrap(y+dy,n)]);
       const chunks = await Promise.all(coords.map(([tx,ty]) => decodeTileToPoints(DECODE_ZOOM, tx, ty)));
       const all = chunks.flat();
-
       const rows = all.filter(f =>
         String(f.properties?.pixel_id) === String(pixelId) &&
         (!placeFilter || f.properties?.place === placeFilter)
@@ -257,7 +247,7 @@
       return m;
     }
 
-    // --- Map style ---
+    // --- Style ---
     const basemapSourceId = "basemap";
     const style = {
       version: 8,
@@ -289,12 +279,11 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // --- GLOBAL per-hour/per-place min/max cache ---
+    // --- Per-hour/per-place min/max cache ---
     const globalMinMaxCache = new Map();
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
       if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
-
       const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
       const filtered = all.filter(f =>
         f.properties?.time === hourStr &&
@@ -327,7 +316,7 @@
     // --- Color ramps ---
     function rampExpr(kind) {
       switch(kind){
-        case "bwyr": // Blue->Cyan->Yellow->Red
+        case "bwyr":
           return ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,0,0,0)",
             0.10, "rgb(49,54,149)",
@@ -336,7 +325,7 @@
             0.70, "rgb(253,174,97)",
             1.00, "rgb(215,48,39)"
           ];
-        case "fire": // Dark->Orange->White
+        case "fire":
           return ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,0,0,0)",
             0.10, "rgb(30,15,15)",
@@ -363,6 +352,7 @@
       }
     }
 
+    // --- Apply scaling to weight (per hour/place) ---
     async function applyScaleToHeat() {
       if (!map.getLayer("heat")) return;
       const mode = $scaleMode.value;
@@ -380,17 +370,34 @@
       );
     }
 
+    // --- Apply visual controls (incl. exponential radius base 2) ---
     function applyVisualControls() {
       if (!map.getLayer("heat")) return;
 
-      // Radius interpolation (zoom-constant feel)
-      const r12 = Number($radiusBase.value);
-      const r16 = Number($radiusHigh.value);
+      // UI labels
+      const r12 = Number($radiusBase.value);   // chosen radius at z12
+      const r16 = Number($radiusHigh.value);   // chosen radius at z16
       $radiusBaseVal.textContent = r12;
       $radiusHighVal.textContent = r16;
 
+      // Derive r10 and r19 using base-2 doubling per zoom:
+      //   r10 = r12 / 2^(12-10) = r12 / 4
+      //   r19 = r16 * 2^(19-16) = r16 * 8
+      let r10 = r12 / 4;
+      let r19 = r16 * 8;
+
+      // Clamp to reasonable pixel sizes
+      r10 = Math.max(1, Math.min(256, r10));
+      r19 = Math.max(8, Math.min(2048, r19));
+
+      // Exponential interpolation with base=2 to stabilize visual density
       map.setPaintProperty("heat", "heatmap-radius",
-        ["interpolate", ["linear"], ["zoom"], 10, Math.max(4, r12*0.8), 12, r12, 14, (r12+r16)/2, 16, r16, 18, Math.max(r16, r16*1.2)]
+        ["interpolate", ["exponential", 2], ["zoom"],
+          10, r10,
+          12, r12,
+          16, r16,
+          19, r19
+        ]
       );
 
       // Intensity / Opacity
@@ -405,6 +412,7 @@
       map.setPaintProperty("heat", "heatmap-color", rampExpr($ramp.value));
     }
 
+    // --- Filter + apply ---
     async function applyFilters() {
       const f = buildFilter();
       if (map.getLayer("heat"))   map.setFilter("heat", f);
@@ -429,9 +437,12 @@
         type: "heatmap",
         source: "temps",
         "source-layer": LAYER_NAME,
+        minzoom: 0,
+        maxzoom: 22,        /* keep rendering at high zooms */
         paint: {
+          // Will be overwritten by applyScaleToHeat + applyVisualControls
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
-          "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 10,10, 12,16, 14,24, 16,36, 18,44],
+          "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"], 10,8, 12,16, 16,36, 19,288],
           "heatmap-intensity": 0.9,
           "heatmap-opacity": 0.95,
           "heatmap-color": rampExpr("gyr")
