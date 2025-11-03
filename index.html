@@ -279,41 +279,49 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // --- Per-hour/per-place min/max cache ---
+    // --- Percentile helper (for robust min/max) ---
+    function quantile(arr, q) {
+      if (!arr.length) return NaN;
+      const a = arr.slice().sort((x,y)=>x-y);
+      const pos = (a.length - 1) * q;
+      const base = Math.floor(pos);
+      const rest = pos - base;
+      const next = a[base + 1];
+      return a[base] + (Number.isFinite(next) ? (next - a[base]) * rest : 0);
+    }
+
+    // --- Per-hour/per-place min/max cache (uses percentiles) ---
     const globalMinMaxCache = new Map();
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
       if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
+
       const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
       const filtered = all.filter(f =>
         f.properties?.time === hourStr &&
         (placeValue === "__all__" || f.properties?.place === placeValue)
       );
-      if (!filtered.length) {
+
+      const values = filtered.map(f => Number(f.properties?.value)).filter(Number.isFinite);
+      if (!values.length) {
         const fallback = { min: 24, max: 36 };
         globalMinMaxCache.set(key, fallback);
         return fallback;
       }
-      let minVal = Infinity, maxVal = -Infinity;
-      for (const f of filtered) {
-        const v = Number(f.properties?.value);
-        if (Number.isFinite(v)) {
-          if (v < minVal) minVal = v;
-          if (v > maxVal) maxVal = v;
-        }
-      }
-      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
-        const fallback = { min: 24, max: 36 };
-        globalMinMaxCache.set(key, fallback);
-        return fallback;
-      }
-      if (minVal === maxVal) maxVal = minVal + 0.1;
-      const res = { min: minVal, max: maxVal };
+
+      // Robust scaling: ignore tails (P10–P98)
+      let pLow  = quantile(values, 0.10);
+      let pHigh = quantile(values, 0.98);
+
+      if (!Number.isFinite(pLow) || !Number.isFinite(pHigh)) { pLow = 24; pHigh = 36; }
+      if (pLow === pHigh) pHigh = pLow + 0.1;
+
+      const res = { min: pLow, max: pHigh };
       globalMinMaxCache.set(key, res);
       return res;
     }
 
-    // --- Color ramps ---
+    // --- Color ramps (tighter red at the very top) ---
     function rampExpr(kind) {
       switch(kind){
         case "bwyr":
@@ -343,10 +351,13 @@
           ];
         case "gyr":
         default:
+          // Red only for the very top; more orange near the top range
           return ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,255,0,0)",
-            0.30, "rgb(0,255,0)",
-            0.60, "rgb(255,255,0)",
+            0.35, "rgb(0,255,0)",
+            0.70, "rgb(255,255,0)",
+            0.90, "rgb(255,165,0)",
+            0.98, "rgb(255,80,0)",
             1.00, "rgb(255,0,0)"
           ];
       }
@@ -370,27 +381,21 @@
       );
     }
 
-    // --- Apply visual controls (incl. exponential radius base 2) ---
+    // --- Apply visual controls (incl. exponential radius, base 2) ---
     function applyVisualControls() {
       if (!map.getLayer("heat")) return;
 
-      // UI labels
-      const r12 = Number($radiusBase.value);   // chosen radius at z12
-      const r16 = Number($radiusHigh.value);   // chosen radius at z16
+      const r12 = Number($radiusBase.value);
+      const r16 = Number($radiusHigh.value);
       $radiusBaseVal.textContent = r12;
       $radiusHighVal.textContent = r16;
 
-      // Derive r10 and r19 using base-2 doubling per zoom:
-      //   r10 = r12 / 2^(12-10) = r12 / 4
-      //   r19 = r16 * 2^(19-16) = r16 * 8
-      let r10 = r12 / 4;
-      let r19 = r16 * 8;
-
-      // Clamp to reasonable pixel sizes
+      // base-2 growth across zooms
+      let r10 = r12 / 4;         // 2 zooms down
+      let r19 = r16 * 8;         // 3 zooms up
       r10 = Math.max(1, Math.min(256, r10));
       r19 = Math.max(8, Math.min(2048, r19));
 
-      // Exponential interpolation with base=2 to stabilize visual density
       map.setPaintProperty("heat", "heatmap-radius",
         ["interpolate", ["exponential", 2], ["zoom"],
           10, r10,
@@ -400,7 +405,6 @@
         ]
       );
 
-      // Intensity / Opacity
       const intensity = Number($intensity.value);
       const opacity = Number($opacity.value);
       $intensityVal.textContent = intensity.toFixed(2);
@@ -408,7 +412,6 @@
       map.setPaintProperty("heat", "heatmap-intensity", intensity);
       map.setPaintProperty("heat", "heatmap-opacity", opacity);
 
-      // Color ramp
       map.setPaintProperty("heat", "heatmap-color", rampExpr($ramp.value));
     }
 
@@ -438,9 +441,8 @@
         source: "temps",
         "source-layer": LAYER_NAME,
         minzoom: 0,
-        maxzoom: 22,        /* keep rendering at high zooms */
+        maxzoom: 22,
         paint: {
-          // Will be overwritten by applyScaleToHeat + applyVisualControls
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
           "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"], 10,8, 12,16, 16,36, 19,288],
           "heatmap-intensity": 0.9,
