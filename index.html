@@ -71,11 +71,11 @@
     </div>
 
     <div class="small" style="margin-top:6px;">
-      Colors are Green→Yellow→Red. Zoom is stabilized internally.
+      
     </div>
   </div>
 
-  <div id="badge">Data: PMTiles (Cloudflare R2) · MapLibre GL</div>
+  <div id="badge"> MapLibre GL</div>
   <div id="chartContainer"><canvas id="tempChart"></canvas></div>
 
   <script src="vendor/maplibre-gl.js"></script>
@@ -223,7 +223,7 @@
         : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
-    // --- Map init ---
+    
     const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
@@ -235,7 +235,7 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // --- Per-hour/per-place min/max cache (for Auto mode) ---
+    
     const globalMinMaxCache = new Map();
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
@@ -269,7 +269,7 @@
       return res;
     }
 
-    // --- Color ramp (fixed G→Y→R) ---
+    
     function applyRampGYR() {
       if (!map.getLayer("heat")) return;
       const ramp = ["interpolate", ["linear"], ["heatmap-density"],
@@ -282,7 +282,7 @@
       map.setPaintProperty("heat", "heatmap-color", ramp);
     }
 
-    // --- Apply scale (Fixed default; Auto optional) ---
+    
     async function applyScaleToHeat() {
       if (!map.getLayer("heat")) return;
       let min, max;
@@ -300,11 +300,11 @@
       );
     }
 
-    // --- Zoom-stable radius (no UI) ---
+    
     function applyRadiusConstant() {
       if (!map.getLayer("heat")) return;
-      const r12 = 5;   // px at z12
-      const r16 = 24;  // px at z16
+      const r12 = 5;   
+      const r16 = 24;  
       const r10 = Math.max(1, r12 / 4);
       const r19 = Math.min(2048, r16 * 8);
       map.setPaintProperty("heat", "heatmap-radius",
@@ -355,7 +355,7 @@
         filter: buildFilter()
       });
 
-      // Invisible picking layer
+      
       map.addLayer({
         id: "points",
         type: "circle",
@@ -371,10 +371,10 @@
         el.addEventListener("change", applyFilters);
       });
 
-      await applyFilters(); // starts in Fixed mode by default
+      await applyFilters(); 
     });
 
-    // --- Popup (absolute values; coords) ---
+   
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -391,7 +391,7 @@
         .addTo(map);
     });
 
-    // --- Click -> chart (pixel_id internal, coord label) ---
+    
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
       let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
