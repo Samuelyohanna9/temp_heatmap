@@ -56,13 +56,22 @@
     </select>
 
     <div class="divider"></div>
-    <strong>Fixed heatmap scale</strong>
+    <strong>Heatmap scale</strong>
+
+    <label for="scaleMode">Scale mode</label>
+    <select id="scaleMode">
+      <option value="auto" selected>Auto (per hour + place)</option>
+      <option value="fixed">Fixed</option>
+    </select>
+
+    <label class="small">Fixed min/max (°C)</label>
     <div class="row">
       <input id="fixedMin" type="number" step="0.1" value="24">
       <input id="fixedMax" type="number" step="0.1" value="36">
     </div>
+
     <div class="small" style="margin-top:6px;">
-      Colors use a constant 24–36 °C scale (editable). Zoom is stabilized internally.
+      Colors are Green→Yellow→Red. Zoom is stabilized internally.
     </div>
   </div>
 
@@ -93,10 +102,6 @@
     const CLICK_MAX_M = 60;
     const DATA_BOUNDS = [10.785482, 45.145304, 10.814915, 45.167814];
 
-    // Fixed min/max UI
-    const $fixedMin = document.getElementById("fixedMin");
-    const $fixedMax = document.getElementById("fixedMax");
-
     const hours24 = Array.from({length:24}, (_,i)=> `${DATE}T${String(i).padStart(2,"0")}:00`);
     const currentTimeStr = () => `${DATE}T${String($hour.value).padStart(2,"0")}:00`;
 
@@ -105,6 +110,9 @@
     const $hour = document.getElementById("hour");
     const $hourLabel = document.getElementById("hourLabel");
     const $place = document.getElementById("place");
+    const $scaleMode = document.getElementById("scaleMode");
+    const $fixedMin = document.getElementById("fixedMin");
+    const $fixedMax = document.getElementById("fixedMax");
     const chartContainer = document.getElementById("chartContainer");
     let chart = null;
 
@@ -227,36 +235,38 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // --- Fixed scale (no auto) ---
-    function applyFixedScale() {
-      if (!map.getLayer("heat")) return;
-      let min = Number($fixedMin.value);
-      let max = Number($fixedMax.value);
-      if (!(Number.isFinite(min) && Number.isFinite(max))) { min = 24; max = 36; }
-      if (min === max) max = min + 0.1;
-
-      map.setPaintProperty("heat", "heatmap-weight",
-        ["interpolate", ["linear"], ["get","value"], min, 0, max, 1]
+    // --- Per-hour/per-place min/max cache (for Auto mode) ---
+    const globalMinMaxCache = new Map();
+    async function getGlobalMinMaxFor(hourStr, placeValue) {
+      const key = `${hourStr}|${placeValue}`;
+      if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
+      const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
+      const filtered = all.filter(f =>
+        f.properties?.time === hourStr &&
+        (placeValue === "__all__" || f.properties?.place === placeValue)
       );
-    }
-
-    // --- Zoom-stable radius (no UI) ---
-    function applyRadiusConstant() {
-      if (!map.getLayer("heat")) return;
-      // Your chosen settings from the screenshot:
-      const r12 = 5;   // px at z12
-      const r16 = 24;  // px at z16
-      const r10 = Math.max(1, r12 / 4);     // base=2 down to z10
-      const r19 = Math.min(2048, r16 * 8);  // base=2 up to z19
-
-      map.setPaintProperty("heat", "heatmap-radius",
-        ["interpolate", ["exponential", 2], ["zoom"],
-          10, r10,
-          12, r12,
-          16, r16,
-          19, r19
-        ]
-      );
+      if (!filtered.length) {
+        const fallback = { min: 24, max: 36 };
+        globalMinMaxCache.set(key, fallback);
+        return fallback;
+      }
+      let minVal = Infinity, maxVal = -Infinity;
+      for (const f of filtered) {
+        const v = Number(f.properties?.value);
+        if (Number.isFinite(v)) {
+          if (v < minVal) minVal = v;
+          if (v > maxVal) maxVal = v;
+        }
+      }
+      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
+        const fallback = { min: 24, max: 36 };
+        globalMinMaxCache.set(key, fallback);
+        return fallback;
+      }
+      if (minVal === maxVal) maxVal = minVal + 0.1;
+      const res = { min: minVal, max: maxVal };
+      globalMinMaxCache.set(key, res);
+      return res;
     }
 
     // --- Color ramp (fixed G→Y→R) ---
@@ -272,13 +282,48 @@
       map.setPaintProperty("heat", "heatmap-color", ramp);
     }
 
+    // --- Apply scale (Auto vs Fixed) ---
+    async function applyScaleToHeat() {
+      if (!map.getLayer("heat")) return;
+      let min, max;
+      if ($scaleMode.value === "auto") {
+        const { min: mi, max: ma } = await getGlobalMinMaxFor(currentTimeStr(), $place.value);
+        min = mi; max = ma;
+      } else {
+        min = Number($fixedMin.value);
+        max = Number($fixedMax.value);
+        if (!(Number.isFinite(min) && Number.isFinite(max))) { min = 24; max = 36; }
+        if (min === max) max = min + 0.1;
+      }
+      map.setPaintProperty("heat", "heatmap-weight",
+        ["interpolate", ["linear"], ["get","value"], min, 0, max, 1]
+      );
+    }
+
+    // --- Zoom-stable radius (no UI) ---
+    function applyRadiusConstant() {
+      if (!map.getLayer("heat")) return;
+      const r12 = 5;   // px at z12
+      const r16 = 24;  // px at z16
+      const r10 = Math.max(1, r12 / 4);
+      const r19 = Math.min(2048, r16 * 8);
+      map.setPaintProperty("heat", "heatmap-radius",
+        ["interpolate", ["exponential", 2], ["zoom"],
+          10, r10,
+          12, r12,
+          16, r16,
+          19, r19
+        ]
+      );
+    }
+
     async function applyFilters() {
       const f = buildFilter();
       if (map.getLayer("heat"))   map.setFilter("heat", f);
       if (map.getLayer("points")) map.setFilter("points", f);
       $hourLabel.textContent = `${String($hour.value).padStart(2,"0")}:00`;
 
-      applyFixedScale();
+      await applyScaleToHeat();
       applyRadiusConstant();
       applyRampGYR();
 
@@ -302,8 +347,8 @@
         paint: {
           "heatmap-weight": ["interpolate", ["linear"], ["get","value"], 24,0, 36,1],
           "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"], 10,2, 12,5, 16,24, 19,192],
-          "heatmap-intensity": 0.9,   /* fixed defaults (hidden) */
-          "heatmap-opacity": 0.95,    /* fixed defaults (hidden) */
+          "heatmap-intensity": 0.9,
+          "heatmap-opacity": 0.95,
           "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,255,0,0)", 0.35, "rgb(0,255,0)", 0.70, "rgb(255,255,0)", 0.90, "rgb(255,165,0)", 1.00, "rgb(255,0,0)"]
         },
@@ -321,7 +366,7 @@
         filter: buildFilter()
       });
 
-      [$hour, $place, $fixedMin, $fixedMax].forEach(el => {
+      [$hour, $place, $scaleMode, $fixedMin, $fixedMax].forEach(el => {
         el.addEventListener("input", applyFilters);
         el.addEventListener("change", applyFilters);
       });
