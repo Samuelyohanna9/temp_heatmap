@@ -94,8 +94,8 @@
 
       <label>Scale mode</label>
       <select id="scaleMode">
-        <option value="auto" selected>Auto (per hour + place)</option>
-        <option value="fixed">Fixed</option>
+        <option value="fixed" selected>Fixed (global range)</option>
+        <option value="auto">Auto (per hour + place)</option>
       </select>
 
       <label class="small">Fixed min/max (°C)</label>
@@ -279,49 +279,26 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // --- Percentile helper (for robust min/max) ---
-    function quantile(arr, q) {
-      if (!arr.length) return NaN;
-      const a = arr.slice().sort((x,y)=>x-y);
-      const pos = (a.length - 1) * q;
-      const base = Math.floor(pos);
-      const rest = pos - base;
-      const next = a[base + 1];
-      return a[base] + (Number.isFinite(next) ? (next - a[base]) * rest : 0);
-    }
-
-    // --- Per-hour/per-place min/max cache (uses percentiles) ---
+    // --- (Optional) per-hour/per-place cache still available for "auto" ---
     const globalMinMaxCache = new Map();
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
       if (globalMinMaxCache.has(key)) return globalMinMaxCache.get(key);
-
       const all = await decodeBoundsToPoints(DATA_BOUNDS, DECODE_ZOOM);
       const filtered = all.filter(f =>
         f.properties?.time === hourStr &&
         (placeValue === "__all__" || f.properties?.place === placeValue)
       );
-
-      const values = filtered.map(f => Number(f.properties?.value)).filter(Number.isFinite);
-      if (!values.length) {
-        const fallback = { min: 24, max: 36 };
-        globalMinMaxCache.set(key, fallback);
-        return fallback;
-      }
-
-      // Robust scaling: ignore tails (P10–P98)
-      let pLow  = quantile(values, 0.10);
-      let pHigh = quantile(values, 0.98);
-
-      if (!Number.isFinite(pLow) || !Number.isFinite(pHigh)) { pLow = 24; pHigh = 36; }
-      if (pLow === pHigh) pHigh = pLow + 0.1;
-
-      const res = { min: pLow, max: pHigh };
+      const vals = filtered.map(f => Number(f.properties?.value)).filter(Number.isFinite);
+      let minVal = Math.min(...vals), maxVal = Math.max(...vals);
+      if (!vals.length || !Number.isFinite(minVal) || !Number.isFinite(maxVal)) { minVal = 24; maxVal = 36; }
+      if (minVal === maxVal) maxVal = minVal + 0.1;
+      const res = { min: minVal, max: maxVal };
       globalMinMaxCache.set(key, res);
       return res;
     }
 
-    // --- Color ramps (tighter red at the very top) ---
+    // --- Color ramps ---
     function rampExpr(kind) {
       switch(kind){
         case "bwyr":
@@ -351,28 +328,26 @@
           ];
         case "gyr":
         default:
-          // Red only for the very top; more orange near the top range
           return ["interpolate", ["linear"], ["heatmap-density"],
             0.00, "rgba(0,255,0,0)",
             0.35, "rgb(0,255,0)",
             0.70, "rgb(255,255,0)",
             0.90, "rgb(255,165,0)",
-            0.98, "rgb(255,80,0)",
             1.00, "rgb(255,0,0)"
           ];
       }
     }
 
-    // --- Apply scaling to weight (per hour/place) ---
+    // --- Apply scaling to weight ---
     async function applyScaleToHeat() {
       if (!map.getLayer("heat")) return;
-      const mode = $scaleMode.value;
       let min = Number($fixedMin.value), max = Number($fixedMax.value);
 
-      if (mode === "auto") {
+      if ($scaleMode.value === "auto") {
         const { min: mi, max: ma } = await getGlobalMinMaxFor(currentTimeStr(), $place.value);
         min = mi; max = ma;
       }
+
       if (!(Number.isFinite(min) && Number.isFinite(max))) { min = 24; max = 36; }
       if (min === max) max = min + 0.1;
 
@@ -381,7 +356,7 @@
       );
     }
 
-    // --- Apply visual controls (incl. exponential radius, base 2) ---
+    // --- Apply visual controls (exponential base 2 radius) ---
     function applyVisualControls() {
       if (!map.getLayer("heat")) return;
 
@@ -390,9 +365,8 @@
       $radiusBaseVal.textContent = r12;
       $radiusHighVal.textContent = r16;
 
-      // base-2 growth across zooms
-      let r10 = r12 / 4;         // 2 zooms down
-      let r19 = r16 * 8;         // 3 zooms up
+      let r10 = r12 / 4;
+      let r19 = r16 * 8;
       r10 = Math.max(1, Math.min(256, r10));
       r19 = Math.max(8, Math.min(2048, r19));
 
@@ -473,7 +447,7 @@
       await applyFilters();
     });
 
-    // --- Popup (absolute values; coords) ---
+    // --- Popup ---
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     map.on("mousemove", (e) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["points"] });
@@ -490,7 +464,7 @@
         .addTo(map);
     });
 
-    // --- Click -> chart (pixel_id internal, coord label) ---
+    // --- Click -> chart ---
     map.on("click", async (e) => {
       const placeFilter = $place.value === "__all__" ? null : $place.value;
       let ft = map.queryRenderedFeatures(e.point, { layers: ["points"] })
