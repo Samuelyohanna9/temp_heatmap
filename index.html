@@ -60,7 +60,7 @@
 
     <label for="scaleMode">Scale mode</label>
     <select id="scaleMode">
-      <option value="auto" selected>Auto (per hour + place)</option>
+      <option value="auto" selected> (per hour + place)</option>
       <option value="fixed">Fixed</option>
     </select>
 
@@ -71,7 +71,7 @@
     </div>
 
     <div class="small" style="margin-top:6px;">
-      Colors are Green→Yellow→Red. Zoom is stabilized internally.
+
     </div>
   </div>
 
@@ -223,7 +223,7 @@
         : [{ id:"bg", type:"background", paint:{ "background-color":"#f3f4f6" }}])
     };
 
-    // --- Map init ---
+  
     const map = new maplibregl.Map({ container: "map", style, center: INIT_CENTER, zoom: INIT_ZOOM, maxZoom: 22 });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
@@ -235,7 +235,7 @@
       return (p === "__all__") ? timeFilter : ["all", timeFilter, ["==", ["get","place"], p]];
     }
 
-    // --- Per-hour/per-place min/max cache (for Auto mode) ---
+   
     const globalMinMaxCache = new Map();
     async function getGlobalMinMaxFor(hourStr, placeValue) {
       const key = `${hourStr}|${placeValue}`;
@@ -269,7 +269,7 @@
       return res;
     }
 
-    // --- Color ramp (fixed G→Y→R) ---
+    
     function applyRampGYR() {
       if (!map.getLayer("heat")) return;
       const ramp = ["interpolate", ["linear"], ["heatmap-density"],
@@ -282,7 +282,7 @@
       map.setPaintProperty("heat", "heatmap-color", ramp);
     }
 
-    // --- Apply scale (Auto vs Fixed) ---
+
     async function applyScaleToHeat() {
       if (!map.getLayer("heat")) return;
       let min, max;
@@ -300,7 +300,7 @@
       );
     }
 
-    // --- Zoom-stable radius (no UI) ---
+   
     function applyRadiusConstant() {
       if (!map.getLayer("heat")) return;
       const r12 = 5;   // px at z12
@@ -355,7 +355,7 @@
         filter: buildFilter()
       });
 
-      // Invisible picking layer
+     
       map.addLayer({
         id: "points",
         type: "circle",
